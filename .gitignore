@@ -1,2 +1,5 @@
-**/manor/assetsnode_modules
+node_modules
 dist
+
+# Large binary manor assets are fetched separately, not versioned here.
+**/manor/assets
