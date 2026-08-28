@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Stella — 3D Character</title>
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <canvas id="app"></canvas>
+
+    <div id="loader">
+      <div class="loader-inner">
+        <h1>Loading character</h1>
+        <div class="bar"><div class="bar-fill" id="bar-fill"></div></div>
+        <p id="loader-status">0%</p>
+      </div>
+    </div>
+
+    <div id="hud" hidden>
+      <div class="hud-keys">
+        <span><b>W A S D</b> / arrows — move</span>
+        <span><b>Shift</b> — run</span>
+        <span><b>Space</b> — jump</span>
+        <span><b>Drag</b> — orbit &nbsp;·&nbsp; <b>Scroll</b> — zoom</span>
+      </div>
+    </div>
+
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
