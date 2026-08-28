@@ -204,6 +204,9 @@ export async function buildManor({ scene, renderer }) {
 
       if (def.collide) {
         colliders.push({
+          // Tagged so callers can tell structure from furniture -- the coffin
+          // looks for walls specifically to land against.
+          name: def.name,
           minX: mesh.position.x - footprint.x / 2,
           maxX: mesh.position.x + footprint.x / 2,
           minZ: mesh.position.z - footprint.z / 2,

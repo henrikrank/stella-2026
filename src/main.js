@@ -4,6 +4,7 @@ import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment
 import { buildManor, resolveCollisions, isBlocked } from './manor.js';
 import { spawnGhost, HITS_TO_BANISH } from './ghost.js';
 import { spawnAxe, restingPlace } from './axe.js';
+import { createHaunting } from './coffin.js';
 import { asset } from './assets.js';
 import { isTouchDevice, setupTouchControls } from './touch.js';
 
@@ -36,6 +37,7 @@ const IDLE_FRAME_TIME = 0.0;
 let level = null;
 let ghost = null;
 let axe = null;
+let haunting = null;
 let handBone = null;
 let handRestQuat = null;
 const CHARACTER_HEIGHT = 1.8;
@@ -310,6 +312,10 @@ const load = (url, onProgress) => new Promise((res, rej) => gltfLoader.load(url,
       .then((g) => { ghost = g; })
       .catch((err) => console.error('ghost failed to spawn', err));
 
+    // Needs the level (for wall drop spots and colliders) and the character to
+    // land beside; state.radius is measured in normalizeAndAdd, above.
+    haunting = createHaunting({ scene, level, character, characterRadius: state.radius });
+
     const entries = Object.entries(CLIP_FILES);
     const loaded = await Promise.all(
       entries.map(([, file]) => load(`${ASSET_DIR}/${file}`).then((g) => g.animations[0]))
@@ -525,6 +531,7 @@ function tick(dtOverride) {
   updateAxe(dt);
   updateCombat(dt);
   ghost?.update(dt);
+  haunting?.update(dt);
 
   updateCamera(dt);
   renderer.render(scene, camera);
@@ -681,6 +688,16 @@ function updateCamera(dt) {
 
   camera.position.lerp(target, 1 - Math.pow(0.001, dt));
   camera.lookAt(camTarget);
+
+  // Coffin impact kick. Applied after lookAt so the jolt shows as a shove of
+  // the whole frame rather than being cancelled by the re-orient.
+  const shake = haunting?.shake ?? 0;
+  if (shake > 0.001) {
+    const amp = shake * shake * 0.5;
+    camera.position.x += (Math.random() - 0.5) * amp;
+    camera.position.y += (Math.random() - 0.5) * amp;
+    camera.position.z += (Math.random() - 0.5) * amp;
+  }
 }
 
 /* --------------------------------------------------------------------- utils */
@@ -726,4 +743,7 @@ window.stella = {
   get actions() { return actions; },
   get current() { return current?._clip?.name ?? null; },
   get mixer() { return mixer; },
+  get haunting() { return haunting; },
+  haunt: () => haunting?.trigger(),
+  banish: () => haunting?.banish(),
 };

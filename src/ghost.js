@@ -40,7 +40,9 @@ const TURN_SPEED = 6;
 const ARRIVE = 0.28; // how close counts as reaching a waypoint
 const CLIP_SPEED = { walk: 1.5, run: 3.4 };
 
-export async function spawnGhost({ scene, level }) {
+// `start` optionally places the ghost at a world position instead of the
+// far corner -- used by the coffin, which decides where its ghost appears.
+export async function spawnGhost({ scene, level, start: startAt = null }) {
   const loader = new GLTFLoader();
   const base = await loader.loadAsync(BASE_URL);
 
@@ -167,12 +169,17 @@ export async function spawnGhost({ scene, level }) {
     return null;
   }
 
-  // Start somewhere far from the player's spawn so it has to be found.
-  const start = open.reduce((best, cell) => {
-    const d = (cellX(cell.c) - level.spawn.x) ** 2 + (cellZ(cell.r) - level.spawn.z) ** 2;
-    return d > best.d ? { cell, d } : best;
-  }, { cell: open[0], d: -1 }).cell;
-  group.position.set(cellX(start.c), 0, cellZ(start.r));
+  // Start somewhere far from the player's spawn so it has to be found, unless
+  // the caller nominated a spot.
+  if (startAt) {
+    group.position.set(startAt.x, 0, startAt.z);
+  } else {
+    const start = open.reduce((best, cell) => {
+      const d = (cellX(cell.c) - level.spawn.x) ** 2 + (cellZ(cell.r) - level.spawn.z) ** 2;
+      return d > best.d ? { cell, d } : best;
+    }, { cell: open[0], d: -1 }).cell;
+    group.position.set(cellX(start.c), 0, cellZ(start.r));
+  }
 
   let path = null;
   let waypoint = 0;
