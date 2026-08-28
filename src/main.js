@@ -5,6 +5,7 @@ import { buildManor, resolveCollisions, isBlocked } from './manor.js';
 import { spawnGhost, HITS_TO_BANISH } from './ghost.js';
 import { spawnAxe, restingPlace } from './axe.js';
 import { asset } from './assets.js';
+import { isTouchDevice, setupTouchControls } from './touch.js';
 
 const ASSET_DIR = asset('assets/characters/main-character');
 
@@ -168,14 +169,32 @@ addEventListener('keyup', (e) => keys.delete(e.code));
 // Punch is a one-shot rather than a held state, so it fires on the keypress
 // instead of being polled in the loop.
 addEventListener('keydown', (e) => {
-  if (e.code !== 'KeyF' || e.repeat || state.cooldown > 0 || state.over) return;
+  if (e.code !== 'KeyF' || e.repeat) return;
+  tryPunch();
+});
+
+function tryPunch() {
+  if (state.cooldown > 0 || state.over) return;
   const clip = state.grounded ? (Math.random() < 0.5 ? 'punch' : 'punchAlt') : 'jumpPunch';
   if (!actions[clip]) return;
   state.punchTimer = PUNCH_HOLD;
   state.cooldown = PUNCH_COOLDOWN;
   state.strikeAt = PUNCH_STRIKE_TIME;
   play(clip, 0.1, true);
-});
+}
+
+// On a phone the stick and buttons stand in for the keyboard. Jump is a
+// one-shot request rather than a held key: faking a timed keypress made her
+// re-jump the moment she landed, since the loop treats a held Space as
+// "jump again".
+let jumpRequested = false;
+
+const touch = isTouchDevice()
+  ? setupTouchControls({
+      onJump: () => { jumpRequested = true; },
+      onAttack: tryPunch,
+    })
+  : null;
 addEventListener('blur', () => keys.clear());
 
 // Orbit camera: yaw/pitch around the character, mouse or touch drag.
@@ -428,9 +447,11 @@ function tick(dtOverride) {
 
   // A/D turn rather than strafe: with the camera locked behind her, turning is
   // what actually steers. Q/E keep a sidestep for when you want one.
+  const stick = touch?.move;
   const turn =
     (keys.has('KeyA') || keys.has('ArrowLeft') ? 1 : 0) +
-    (keys.has('KeyD') || keys.has('ArrowRight') ? -1 : 0);
+    (keys.has('KeyD') || keys.has('ArrowRight') ? -1 : 0) +
+    (stick ? -stick.x : 0);
   if (turn) orbit.yaw += turn * TURN_RATE * dt;
 
   desired.set(0, 0, 0);
@@ -438,9 +459,15 @@ function tick(dtOverride) {
   if (keys.has('KeyS') || keys.has('ArrowDown')) desired.sub(forward);
   if (keys.has('KeyE')) desired.add(right);
   if (keys.has('KeyQ')) desired.sub(right);
+  // The stick is analog: how far it is pushed sets the pace, so a gentle push
+  // walks and a full one runs, without a separate run button.
+  if (stick && stick.y !== 0) desired.addScaledVector(forward, stick.y);
 
   const running = keys.has('ShiftLeft') || keys.has('ShiftRight');
-  const speed = running ? RUN_SPEED : WALK_SPEED;
+  const push = stick ? Math.abs(stick.y) : 0;
+  const speed = push > 0
+    ? WALK_SPEED + (RUN_SPEED - WALK_SPEED) * clamp((push - 0.45) / 0.55, 0, 1)
+    : running ? RUN_SPEED : WALK_SPEED;
   const moving = desired.lengthSq() > 0;
   if (moving) desired.normalize().multiplyScalar(speed);
 
@@ -462,10 +489,11 @@ function tick(dtOverride) {
   }
 
   // Jump + gravity.
-  if (keys.has('Space') && state.grounded) {
+  if ((keys.has('Space') || jumpRequested) && state.grounded) {
     state.vy = JUMP_SPEED;
     state.grounded = false;
   }
+  jumpRequested = false;
   if (!state.grounded) {
     state.vy -= GRAVITY * dt;
     state.y += state.vy * dt;

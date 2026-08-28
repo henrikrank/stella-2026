@@ -139,3 +139,102 @@ html, body {
 }
 #tracker.armed #axe-badge { display: inline-block; }
 #tracker.armed { border-color: rgba(255, 196, 138, .5); }
+
+/* Touch controls ---------------------------------------------------------- */
+/* Present only on touch devices; setupTouchControls unhides them and puts
+   .touch on <body>. */
+
+html, body { overscroll-behavior: none; }
+
+#touch { position: fixed; inset: 0; z-index: 15; pointer-events: none; }
+
+/* The stick sits in one place, always on screen, the way a mobile game's does.
+   The whole lower-left quadrant accepts the thumb so it doesn't have to be
+   landed precisely on the circle. */
+#stick-zone {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  width: 55%;
+  height: 62%;
+  pointer-events: auto;
+  touch-action: none;
+}
+
+#stick-base {
+  position: absolute;
+  left: 34px;
+  bottom: 42px;
+  width: 132px;
+  height: 132px;
+  border-radius: 50%;
+  border: 2px solid rgba(148, 190, 255, .35);
+  background: rgba(10, 13, 18, .38);
+  backdrop-filter: blur(3px);
+  transition: border-color .18s ease, background .18s ease;
+  pointer-events: none;
+}
+#stick-base.active {
+  border-color: rgba(134, 197, 255, .65);
+  background: rgba(10, 13, 18, .5);
+}
+
+#stick-knob {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 58px;
+  height: 58px;
+  border-radius: 50%;
+  background: rgba(134, 197, 255, .6);
+  border: 1px solid rgba(190, 224, 255, .7);
+  box-shadow: 0 0 20px rgba(134, 197, 255, .5);
+  transform: translate(-50%, -50%);
+  /* Springs back to centre on release; silenced while dragging. */
+  transition: transform .16s ease;
+}
+#stick-base.active #stick-knob { transition: none; }
+
+#buttons {
+  position: absolute;
+  right: 22px;
+  bottom: 34px;
+  display: flex;
+  align-items: flex-end;
+  gap: 16px;
+  pointer-events: auto;
+}
+
+#buttons button {
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: .1em;
+  color: var(--fg);
+  border-radius: 50%;
+  border: 1px solid rgba(148, 190, 255, .3);
+  background: rgba(10, 13, 18, .5);
+  backdrop-filter: blur(6px);
+  touch-action: none;
+  -webkit-tap-highlight-color: transparent;
+  user-select: none;
+  transition: transform .08s ease, background .12s ease;
+}
+
+#buttons #btn-jump { width: 74px; height: 74px; }
+
+#buttons #btn-attack {
+  width: 96px;
+  height: 96px;
+  color: #0b0e13;
+  background: rgba(255, 196, 138, .92);
+  border-color: rgba(255, 196, 138, .6);
+}
+
+#buttons button.pressed { transform: scale(.92); }
+#buttons #btn-jump.pressed { background: rgba(134, 197, 255, .5); }
+
+/* Keyboard hints are noise on a phone, and the tracker needs to clear the
+   notch area. */
+body.touch #hud { display: none; }
+body.touch #tracker { top: max(18px, env(safe-area-inset-top)); }
