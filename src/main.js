@@ -60,6 +60,17 @@ const CAMERA_MARGIN = 0.35;
 const TURN_TO_CAMERA = 7.0; // rad/s
 const TURN_RATE = 2.4; // rad/s, how fast A/D swing the view around
 
+// Backing up is a turn-and-run, not a moonwalk: S spins her about face and she
+// runs that way, with the camera swinging in behind a moment later.
+//
+// The heading is latched when S goes down rather than read from the camera each
+// frame. Recomputing it would mean that once the camera settles behind her, S
+// reads as "backwards" again -- and she would pivot, and pivot, and spin.
+const REVERSE_TURN_SPEED = 9; // rad/s for the about-face itself
+const REVERSE_CAMERA_DELAY = 0.35; // s of watching her turn before the camera moves
+const REVERSE_CAMERA_GAIN = 3.2;
+const REVERSE_CAMERA_MAX_RATE = 3.4; // rad/s
+
 // Dragging the mouse breaks that link and frees the camera, so you can orbit
 // right around and look at her. She holds her ground while you do -- if she
 // kept following the camera you could never get in front of her. Touch a
@@ -155,6 +166,9 @@ const state = {
   armed: false,
   health: MAX_HEALTH,
   invuln: 0,
+  reversing: false,
+  reverseDir: 0, // latched heading for the about-face
+  reverseCam: 0, // delay before the camera follows her round
 };
 
 let mixer = null;
@@ -444,6 +458,7 @@ const clock = new THREE.Clock();
 const forward = new THREE.Vector3();
 const right = new THREE.Vector3();
 const desired = new THREE.Vector3();
+const reverseHeading = new THREE.Vector3();
 const camTarget = new THREE.Vector3();
 
 // Wrapped, not passed directly: setAnimationLoop hands the callback a rAF
@@ -468,9 +483,24 @@ function tick(dtOverride) {
     (stick ? -stick.x : 0);
   if (turn) orbit.yaw += turn * TURN_RATE * dt;
 
+  const forwardKey = keys.has('KeyW') || keys.has('ArrowUp');
+  const backKey = keys.has('KeyS') || keys.has('ArrowDown');
+
+  if (backKey && !forwardKey) {
+    if (!state.reversing) {
+      state.reversing = true;
+      state.reverseDir = orbit.yaw + Math.PI;
+      state.reverseCam = REVERSE_CAMERA_DELAY;
+    }
+    // Keep A/D steering her while she runs, turning her with the view.
+    state.reverseDir += turn * TURN_RATE * dt;
+  } else {
+    state.reversing = false;
+  }
+
   desired.set(0, 0, 0);
-  if (keys.has('KeyW') || keys.has('ArrowUp')) desired.add(forward);
-  if (keys.has('KeyS') || keys.has('ArrowDown')) desired.sub(forward);
+  if (forwardKey) desired.add(forward);
+  if (state.reversing) desired.add(reverseHeading.set(Math.sin(state.reverseDir), 0, Math.cos(state.reverseDir)));
   if (keys.has('KeyE')) desired.add(right);
   if (keys.has('KeyQ')) desired.sub(right);
   // The stick is analog: how far it is pushed sets the pace, so a gentle push
@@ -524,7 +554,18 @@ function tick(dtOverride) {
   // into one.
   // Locked play: the camera owns the facing, so her back is always to it.
   // During free look she holds still and the camera moves around her instead.
-  if (!orbit.free) {
+  // Backing up is the exception -- she turns to the latched heading and the
+  // camera follows her round, which reads as an about-face, not a moonwalk.
+  if (state.reversing) {
+    state.facing = angleTowards(state.facing, state.reverseDir, REVERSE_TURN_SPEED * dt);
+
+    state.reverseCam = Math.max(0, state.reverseCam - dt);
+    if (state.reverseCam <= 0) {
+      const diff = angleDelta(state.reverseDir, orbit.yaw);
+      const cap = REVERSE_CAMERA_MAX_RATE * dt;
+      orbit.yaw += clamp(diff * REVERSE_CAMERA_GAIN * dt, -cap, cap);
+    }
+  } else if (!orbit.free) {
     state.facing = angleTowards(state.facing, orbit.yaw, TURN_TO_CAMERA * dt);
   }
   character.rotation.y = state.facing;
@@ -551,6 +592,7 @@ function updateAnimation(speed, dt) {
 
   // Travelling against the way she faces means she is walking backwards.
   const backwards =
+    !state.reversing &&
     speed > 0.1 &&
     state.velocity.x * Math.sin(state.facing) + state.velocity.z * Math.cos(state.facing) < 0;
 
@@ -789,7 +831,7 @@ resize();
 
 // Handy for poking at the controller from the console.
 window.stella = {
-  THREE, scene, camera, renderer, character, state, orbit,
+  THREE, scene, camera, renderer, character, state, orbit, keys,
   get level() { return level; },
   get ghost() { return ghost; },
   get axe() { return axe; },
