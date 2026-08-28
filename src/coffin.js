@@ -164,7 +164,9 @@ export function createHaunting({
     // Shuffle within reach so it isn't the same wall every time.
     for (const w of shuffle(ranked)) {
       // Step off each face in turn; the one that lands in open floor is the
-      // room side. Interior walls have two, exterior only one.
+      // room side. Interior walls have two, exterior only one -- and the far
+      // side of an exterior wall is the void outside the manor, which is
+      // unblocked and inside the bounds, so it has to be excluded explicitly.
       const half = { x: (w.b.maxX - w.b.minX) / 2, z: (w.b.maxZ - w.b.minZ) / 2 };
       const faces = [
         { dx: 0, dz: -1, off: half.z },
@@ -177,6 +179,7 @@ export function createHaunting({
         const x = w.cx + f.dx * (f.off + gap);
         const z = w.cz + f.dz * (f.off + gap);
 
+        if (!level.isFloor(x, z)) continue; // outside the rooms entirely
         if (isBlocked(x, z, level.colliders, clearance())) continue;
         if (Math.abs(x) > level.bounds.x - 0.6 || Math.abs(z) > level.bounds.z - 0.6) continue;
 

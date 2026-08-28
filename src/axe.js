@@ -27,6 +27,14 @@ const HAND_OFFSET = new THREE.Vector3(0, 0.02, 0);
 const PICKUP_RANGE = 1.3;
 const REST_HEIGHT = 0.55;
 
+// Waiting to be found, the axe lights itself as well as the floor around it --
+// a lamp-lit manor is dark enough that a prop lit only from outside disappears
+// into the panelling. The glow is dropped once it is in hand.
+const PICKUP_GLOW = new THREE.Color(0xffb066);
+const PICKUP_GLOW_BASE = 0.55;
+const PICKUP_GLOW_PULSE = 0.3;
+const HELD_GLOW = 0.06; // a hint of it survives, so the blade still catches light
+
 export async function spawnAxe({ scene, level, position }) {
   const _pos = new THREE.Vector3();
   const _quat = new THREE.Quaternion();
@@ -57,7 +65,18 @@ export async function spawnAxe({ scene, level, position }) {
   pickup.position.copy(position);
   pickup.scale.setScalar(HELD_LENGTH / AXE_LENGTH);
 
-  const glow = new THREE.PointLight(0xffc48a, 6, 4.5, 2);
+  // Make the axe itself emit, keyed off its own colour map so the glow follows
+  // the blade and banding rather than washing the whole model flat.
+  const glowing = [];
+  mesh.traverse((o) => {
+    if (!o.isMesh || !o.material) return;
+    o.material.emissive = PICKUP_GLOW.clone();
+    o.material.emissiveMap = o.material.map ?? null;
+    o.material.emissiveIntensity = PICKUP_GLOW_BASE;
+    glowing.push(o.material);
+  });
+
+  const glow = new THREE.PointLight(0xffc48a, 11, 7, 2);
   glow.position.y = 0.4;
   pickup.add(glow);
 
@@ -76,7 +95,10 @@ export async function spawnAxe({ scene, level, position }) {
     bob += dt;
     pickup.rotation.y += dt * 1.1;
     pickup.position.y = REST_HEIGHT + Math.sin(bob * 1.8) * 0.08;
-    glow.intensity = 5 + Math.sin(bob * 3) * 1.5;
+
+    const pulse = Math.sin(bob * 3);
+    glow.intensity = 10 + pulse * 3.5;
+    for (const m of glowing) m.emissiveIntensity = PICKUP_GLOW_BASE + pulse * PICKUP_GLOW_PULSE;
   }
 
   function isNear(point) {
@@ -107,6 +129,9 @@ export async function spawnAxe({ scene, level, position }) {
     pickup.remove(held);
     glow.removeFromParent();
     pickup.removeFromParent();
+
+    // In hand it is a weapon, not a beacon.
+    for (const m of glowing) m.emissiveIntensity = HELD_GLOW;
 
     held.scale.setScalar(HELD_LENGTH / AXE_LENGTH);
     scene.add(held);
