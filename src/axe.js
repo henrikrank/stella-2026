@@ -35,7 +35,15 @@ const PICKUP_GLOW_BASE = 0.55;
 const PICKUP_GLOW_PULSE = 0.3;
 const HELD_GLOW = 0.06; // a hint of it survives, so the blade still catches light
 
-export async function spawnAxe({ scene, level, position }) {
+// Fallback when no parked light is supplied. Costs one recompile on the frame
+// it is added, which is why main.js hands one over instead.
+function addOwnLight(scene) {
+  const light = new THREE.PointLight(0xffffff, 0, 1, 2);
+  scene.add(light);
+  return light;
+}
+
+export async function spawnAxe({ scene, level, position, glow: parkedGlow = null }) {
   const _pos = new THREE.Vector3();
   const _quat = new THREE.Quaternion();
   const _scale = new THREE.Vector3();
@@ -76,9 +84,16 @@ export async function spawnAxe({ scene, level, position }) {
     glowing.push(o.material);
   });
 
-  const glow = new THREE.PointLight(0xffc48a, 11, 7, 2);
-  glow.position.y = 0.4;
-  pickup.add(glow);
+  // The light is handed in, not created here. Adding a point light to the scene
+  // changes three's light count, which invalidates every material in it and
+  // recompiles the lot -- ~80 ms, landing on the frame the axe appears and
+  // again on the frame it is picked up. A light parked in the scene since boot
+  // costs nothing to brighten. It is positioned in world space rather than
+  // parented, so picking the axe up never moves it out of the scene.
+  const glow = parkedGlow ?? addOwnLight(scene);
+  glow.color.setHex(0xffc48a);
+  glow.distance = 7;
+  glow.decay = 2;
 
   scene.add(pickup);
 
@@ -97,6 +112,7 @@ export async function spawnAxe({ scene, level, position }) {
     pickup.position.y = REST_HEIGHT + Math.sin(bob * 1.8) * 0.08;
 
     const pulse = Math.sin(bob * 3);
+    glow.position.set(pickup.position.x, pickup.position.y + 0.4, pickup.position.z);
     glow.intensity = 10 + pulse * 3.5;
     for (const m of glowing) m.emissiveIntensity = PICKUP_GLOW_BASE + pulse * PICKUP_GLOW_PULSE;
   }
@@ -127,7 +143,8 @@ export async function spawnAxe({ scene, level, position }) {
     grip.copy(restQuat).invert().multiply(targetOrientation());
 
     pickup.remove(held);
-    glow.removeFromParent();
+    // Dimmed, not removed -- see the note where it is taken.
+    glow.intensity = 0;
     pickup.removeFromParent();
 
     // In hand it is a weapon, not a beacon.

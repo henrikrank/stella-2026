@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { isBlocked } from './manor.js';
 import { asset } from './assets.js';
-import { spawnGhost } from './ghost.js';
+import { spawnGhost, preloadGhost } from './ghost.js';
 
 /**
  * The haunting: every so often a coffin drops out of the ceiling somewhere
@@ -55,6 +55,26 @@ const DROP_MAX = 7.5;
 const rand = (lo, hi) => lo + Math.random() * (hi - lo);
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 
+function buildDust(count) {
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(count * 3), 3));
+  const points = new THREE.Points(
+    geo,
+    new THREE.PointsMaterial({ color: 0x9c8f7a, size: 0.06, transparent: true, opacity: 0.8, depthWrite: false })
+  );
+  points.frustumCulled = false;
+  points.visible = false;
+  return points;
+}
+
+// Fallback when no parked light is supplied. Costs one recompile on the frame
+// it is added, which is why main.js hands them over instead.
+function addOwnLight(scene) {
+  const light = new THREE.PointLight(0xffffff, 0, 1, 2);
+  scene.add(light);
+  return light;
+}
+
 export function createHaunting({
   scene,
   level,
@@ -64,21 +84,49 @@ export function createHaunting({
   // makes one dangerous: who to hunt, and what to call when it lands a blow.
   onAttack = null,
   onGhost = null,
+  // Two point lights, parked in the scene since boot. A light entering or
+  // leaving the scene changes three's light count and recompiles every
+  // material in it -- ~80 ms, landing squarely on the frame the coffin hits
+  // the floor and again on the frame the ghost comes out. Reusing two that are
+  // already counted makes both of those frames ordinary ones.
+  glow = null,
+  ghostGlow = null,
 }) {
   const group = new THREE.Group();
   scene.add(group);
 
+  // The dust is built once and reused. Creating a Points per burst meant
+  // disposing its material per burst, which released the compiled program --
+  // so every drop paid to compile it again, 30-140 ms on the exact frame the
+  // coffin hits the floor. Now it is parked in the group and switched on.
+  const DUST_COUNT = 90;
+  const dust = buildDust(DUST_COUNT);
+  group.add(dust);
+
+  const coffinGlow = glow ?? addOwnLight(scene);
+  coffinGlow.color.setHex(0x74e2ff);
+  coffinGlow.distance = 6;
+  coffinGlow.decay = 2;
+  coffinGlow.intensity = 0;
+
   const loader = new GLTFLoader();
   const load = (url) => new Promise((res, rej) => loader.load(url, res, undefined, rej));
 
-  // Assets stream in behind the first timer, so the opening minutes of play
-  // aren't blocked on ~18 MB of mesh.
+  // Both the coffin and the ghost load at boot, behind the first timer. They
+  // used to arrive at the moment they were needed, which put a multi-megabyte
+  // parse and a first-frame shader compile right where the player is watching:
+  // the drop stuttered, and the ghost's emergence stuttered again.
   let coffinAsset = null;
   const coffinReady = load(COFFIN_URL).then((g) => {
     coffinAsset = prepareCoffin(g.scene);
     return coffinAsset;
   }).catch((err) => {
     console.error('haunting: coffin failed to load', err);
+    return null;
+  });
+
+  const ghostReady = preloadGhost().catch((err) => {
+    console.error('haunting: ghost failed to preload', err);
     return null;
   });
 
@@ -229,12 +277,10 @@ export function createHaunting({
       scene.remove(state.ghost.group);
       onGhost?.(null);
     }
-    if (state.glow) group.remove(state.glow);
-    if (state.dust) {
-      group.remove(state.dust);
-      state.dust.geometry.dispose();
-      state.dust.material.dispose();
-    }
+    // Dimmed, not removed -- see the note on the constructor's `glow`.
+    coffinGlow.intensity = 0;
+    if (ghostGlow) ghostGlow.intensity = 0;
+    dust.visible = false;
     if (state.collider) {
       const i = level.colliders.indexOf(state.collider);
       if (i !== -1) level.colliders.splice(i, 1);
@@ -302,18 +348,18 @@ export function createHaunting({
     };
     level.colliders.push(state.collider);
 
-    state.glow = new THREE.PointLight(0x74e2ff, 0.9, 6, 2);
+    state.glow = coffinGlow;
+    state.glow.color.setHex(0x74e2ff);
+    state.glow.intensity = 0.9;
     state.glow.position.set(c.position.x, 1.1, c.position.z);
-    group.add(state.glow);
 
     spawnDust(c.position);
   }
 
   function spawnDust(at) {
-    const COUNT = 90;
-    const pos = new Float32Array(COUNT * 3);
+    const pos = dust.geometry.attributes.position.array;
     const vel = [];
-    for (let i = 0; i < COUNT; i++) {
+    for (let i = 0; i < DUST_COUNT; i++) {
       pos[i * 3] = at.x;
       pos[i * 3 + 1] = 0.05;
       pos[i * 3 + 2] = at.z;
@@ -321,15 +367,10 @@ export function createHaunting({
       const speed = rand(0.6, 2.4);
       vel.push(new THREE.Vector3(Math.sin(a) * speed, rand(0.4, 1.8), Math.cos(a) * speed));
     }
-    const geo = new THREE.BufferGeometry();
-    geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-    const points = new THREE.Points(
-      geo,
-      new THREE.PointsMaterial({ color: 0x9c8f7a, size: 0.06, transparent: true, opacity: 0.8, depthWrite: false })
-    );
-    points.frustumCulled = false;
-    group.add(points);
-    state.dust = points;
+    dust.geometry.attributes.position.needsUpdate = true;
+    dust.material.opacity = 0.8;
+    dust.visible = true;
+    state.dust = dust;
     state.dustVel = vel;
     state.dustLife = 1.6;
   }
@@ -353,6 +394,7 @@ export function createHaunting({
         start: { x: ex, z: ez },
         target: character,
         onAttack,
+        glow: ghostGlow,
       });
     } catch (err) {
       console.error('haunting: ghost failed to spawn', err);
@@ -496,9 +538,8 @@ export function createHaunting({
     state.dust.material.opacity = clamp(state.dustLife / 1.6, 0, 1) * 0.8;
 
     if (state.dustLife <= 0) {
-      group.remove(state.dust);
-      state.dust.geometry.dispose();
-      state.dust.material.dispose();
+      // Hidden, never disposed -- see where it is built.
+      dust.visible = false;
       state.dust = null;
     }
   }
@@ -508,6 +549,12 @@ export function createHaunting({
   return {
     update,
     trigger,
+    // Resolves once both models are parsed, with the meshes the renderer needs
+    // to compile. Downloading them early only moves half the stall: the first
+    // draw of an uncompiled material still costs a frame.
+    ready: Promise.all([coffinReady, ghostReady]).then(([coffin, ghost]) =>
+      [coffin?.model, ghost?.model, dust].filter(Boolean)
+    ),
     banish() {
       clear();
       state.phase = 'waiting';

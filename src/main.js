@@ -60,12 +60,16 @@ const CAMERA_MARGIN = 0.35;
 const TURN_TO_CAMERA = 7.0; // rad/s
 const TURN_RATE = 2.4; // rad/s, how fast A/D swing the view around
 
-// Backing up is a turn-and-run, not a moonwalk: S spins her about face and she
-// runs that way, with the camera swinging in behind a moment later.
+// S backs her straight up, facing the camera -- the thing you want when you are
+// edging away from a ghost and need to keep your eyes on it. Double-tapping S
+// is the about-face instead: she spins 180 and runs that way, with the camera
+// swinging in behind a moment later.
 //
-// The heading is latched when S goes down rather than read from the camera each
-// frame. Recomputing it would mean that once the camera settles behind her, S
-// reads as "backwards" again -- and she would pivot, and pivot, and spin.
+// The heading is latched when the about-face starts rather than read from the
+// camera each frame. Recomputing it would mean that once the camera settled
+// behind her she would read as "backwards" again -- and she would pivot, and
+// pivot, and spin.
+const REVERSE_TAP_WINDOW = 0.3; // s between the two S presses
 const REVERSE_TURN_SPEED = 9; // rad/s for the about-face itself
 const REVERSE_CAMERA_DELAY = 0.35; // s of watching her turn before the camera moves
 const REVERSE_CAMERA_GAIN = 3.2;
@@ -137,6 +141,29 @@ moon.shadow.bias = -0.0005;
 moon.shadow.normalBias = 0.02;
 scene.add(moon);
 
+// Three lights that would otherwise come and go during play: the axe's while it
+// waits to be found, the coffin's, and the ghost's. three compiles its shaders
+// against the number of lights in the scene, so adding or removing one
+// invalidates every material and recompiles the lot -- about 80 ms here, and it
+// lands on exactly the frames you least want it: the coffin hitting the floor,
+// the ghost climbing out, the axe going into her hand. Made once, before the
+// first render, and handed to their owners parked at zero; from then on only
+// their position and intensity change and the count never moves.
+const hauntLights = {
+  axe: parkedLight(),
+  coffin: parkedLight(),
+  ghost: parkedLight(),
+};
+
+function parkedLight() {
+  // Below the floor rather than at the origin: dark either way, but a stray
+  // light at her feet would be a confusing thing to go looking for.
+  const light = new THREE.PointLight(0xffffff, 0, 1, 2);
+  light.position.set(0, -50, 0);
+  scene.add(light);
+  return light;
+}
+
 // The shadow frustum has to cover the whole floor plan, so it is sized from the
 // level once that is built rather than hardcoded to one map's dimensions.
 function fitShadowsToLevel() {
@@ -177,6 +204,7 @@ const state = {
   health: MAX_HEALTH,
   invuln: 0,
   reversing: false,
+  aboutFace: false, // the double-tap has been seen; latch on the next frame
   reverseDir: 0, // latched heading for the about-face
   reverseCam: 0, // delay before the camera follows her round
 };
@@ -199,6 +227,16 @@ addEventListener('keydown', (e) => {
   keys.add(e.code);
 });
 addEventListener('keyup', (e) => keys.delete(e.code));
+
+// Two S presses inside the window arm the about-face; it then holds for as long
+// as S is. Held-key repeats are ignored, or leaning on S would trigger it.
+let lastBackPress = -Infinity;
+addEventListener('keydown', (e) => {
+  if (e.repeat || (e.code !== 'KeyS' && e.code !== 'ArrowDown')) return;
+  const now = performance.now() / 1000;
+  if (now - lastBackPress <= REVERSE_TAP_WINDOW) state.aboutFace = true;
+  lastBackPress = now;
+});
 
 // Punch is a one-shot rather than a held state, so it fires on the keypress
 // instead of being polled in the loop.
@@ -337,7 +375,7 @@ const load = (url, onProgress) => new Promise((res, rej) => gltfLoader.load(url,
 
     // Remaining clips load in the background; each is pulled out of its file
     // and its skinned mesh discarded.
-    spawnAxe({ scene, level, position: randomRestingPlace(level, { away: level.spawn }) })
+    spawnAxe({ scene, level, position: randomRestingPlace(level, { away: level.spawn }), glow: hauntLights.axe })
       .then((a) => { axe = a; })
       .catch((err) => console.error('axe failed to spawn', err));
 
@@ -354,7 +392,26 @@ const load = (url, onProgress) => new Promise((res, rej) => gltfLoader.load(url,
       characterRadius: state.radius,
       onAttack: hurtPlayer,
       onGhost: (g) => { ghost = g; },
+      glow: hauntLights.coffin,
+      ghostGlow: hauntLights.ghost,
     });
+
+    // Compile the haunting's shaders and upload its textures while nothing is
+    // happening. Without this the first frame the coffin (or the ghost) is
+    // drawn on stalls for as long as the compile takes -- a visible hitch on
+    // the drop, which is the one moment the player is looking straight at it.
+    haunting.ready
+      .then(async (models) => {
+        for (const model of models) {
+          // compileAsync walks the visible graph, so anything parked out of
+          // sight has to be shown for the length of the compile.
+          const wasVisible = model.visible;
+          model.visible = true;
+          await renderer.compileAsync(model, camera, scene);
+          model.visible = wasVisible;
+        }
+      })
+      .catch((err) => console.error('haunting: warm-up failed', err));
 
     const entries = Object.entries(CLIP_FILES);
     const loaded = await Promise.all(
@@ -505,20 +562,23 @@ function tick(dtOverride) {
   const backKey = keys.has('KeyS') || keys.has('ArrowDown');
 
   if (backKey && !forwardKey) {
-    if (!state.reversing) {
+    if (state.aboutFace && !state.reversing) {
       state.reversing = true;
       state.reverseDir = orbit.yaw + Math.PI;
       state.reverseCam = REVERSE_CAMERA_DELAY;
     }
     // Keep A/D steering her while she runs, turning her with the view.
-    state.reverseDir += turn * TURN_RATE * dt;
+    if (state.reversing) state.reverseDir += turn * TURN_RATE * dt;
   } else {
+    // Letting go of S ends the about-face; the next one needs its own two taps.
     state.reversing = false;
+    state.aboutFace = false;
   }
 
   desired.set(0, 0, 0);
   if (forwardKey) desired.add(forward);
   if (state.reversing) desired.add(reverseHeading.set(Math.sin(state.reverseDir), 0, Math.cos(state.reverseDir)));
+  else if (backKey) desired.sub(forward);
   if (keys.has('KeyE')) desired.add(right);
   if (keys.has('KeyQ')) desired.sub(right);
   // The stick is analog: how far it is pushed sets the pace, so a gentle push
@@ -598,7 +658,9 @@ function tick(dtOverride) {
   state.invuln = Math.max(0, state.invuln - dt);
   updateAxe(dt);
   updateCombat(dt);
-  ghost?.update(dt);
+  // The haunting drives the ghost -- it owns the only one there is. Ticking it
+  // here as well ran it at double speed (and double clip rate, so its feet
+  // skated), which is why it could outrun a sprint.
   haunting?.update(dt);
 
   updateCamera(dt);

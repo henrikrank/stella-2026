@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { clone as cloneSkinned } from 'three/examples/jsm/utils/SkeletonUtils.js';
 import { isBlocked } from './manor.js';
 import { asset } from './assets.js';
 
@@ -34,7 +35,7 @@ const STUN_TIME = 1.15;
 // when the player sits right on the boundary.
 const AGGRO_RANGE = 7.5;
 const LOSE_RANGE = 11;
-const CHASE_SPEED = 2.9;
+const CHASE_SPEED = 2.4;
 const REACH = 1.15; // how close it must be to land a blow
 const SWIPE_COOLDOWN = 1.6; // seconds between blows
 const REPATH_INTERVAL = 0.35; // how often the chase path is recomputed
@@ -44,7 +45,7 @@ const REPATH_INTERVAL = 0.35; // how often the chase path is recomputed
 // before closing in again.
 const FLEE_AFTER_SWIPE = 3.2; // seconds spent retreating after landing a blow
 const FLEE_AFTER_HIT = 4; // longer after being hit -- it has learnt something
-const FLEE_SPEED = 3.4; // faster than it chases; it is genuinely running
+const FLEE_SPEED = 2.9; // faster than it chases; it is genuinely running
 const FLEE_MIN_GAP = 6; // how far away a retreat spot has to be
 const KNOCKBACK = 0.75;
 const FADE_TIME = 2.2;
@@ -52,22 +53,53 @@ const FADE_TIME = 2.2;
 const HEIGHT = 1.75;
 const NAV_CELL = 0.5; // navigation grid resolution, metres
 const RADIUS = 0.32; // clearance the ghost needs from walls and furniture
-const WALK_SPEED = 1.1;
-const RUN_SPEED = 2.6;
+const WALK_SPEED = 0.95;
+const RUN_SPEED = 2.2;
 const TURN_SPEED = 6;
 const ARRIVE = 0.28; // how close counts as reaching a waypoint
 const CLIP_SPEED = { walk: 1.5, run: 3.4 };
 
-// `start` optionally places the ghost at a world position instead of the
-// far corner -- used by the coffin, which decides where its ghost appears.
-export async function spawnGhost({ scene, level, start: startAt = null, target = null, onAttack = null }) {
+// Fallback when no parked light is supplied. Costs one recompile on the frame
+// it is added, which is why the haunting hands one over instead.
+function addOwnLight(scene) {
+  const light = new THREE.PointLight(0x86c5ff, 0, 6, 2);
+  scene.add(light);
+  return light;
+}
+
+/* --------------------------------------------------------------- preloading */
+
+// Five skinned GLBs, ~37 MB all told. Pulled at boot that is invisible; pulled
+// when the coffin opens it is a stall at the exact moment the player is staring
+// at the lid. So the whole set loads and is prepared once, up front, and every
+// ghost after that is a clone of it.
+let assets = null;
+
+export function preloadGhost() {
+  assets ??= loadAssets();
+  return assets;
+}
+
+async function loadAssets() {
   const loader = new GLTFLoader();
   const base = await loader.loadAsync(BASE_URL);
+  const clips = { walk: base.animations[0] };
 
-  const group = new THREE.Group();
-  scene.add(group);
+  await Promise.all(
+    Object.entries(CLIP_FILES).map(([name, file]) =>
+      loader.loadAsync(`${DIR}/${file}`).then((g) => { clips[name] = g.animations[0]; })
+    )
+  );
 
-  const model = base.scene;
+  // Stripped once, on the shared clips: they now outlive any single ghost.
+  for (const clip of Object.values(clips)) if (clip) stripHorizontalRootMotion(clip);
+
+  return { model: prepareModel(base.scene), clips };
+}
+
+// Normalise to HEIGHT, centre on the origin, and wash it cold and translucent.
+// Done to the shared source so a spawn is a clone, not a rebuild.
+function prepareModel(model) {
   model.updateWorldMatrix(true, true);
   const bounds = new THREE.Box3().setFromObject(model);
   const size = bounds.getSize(new THREE.Vector3());
@@ -102,26 +134,52 @@ export async function spawnGhost({ scene, level, start: startAt = null, target =
     });
   });
 
+  return model;
+}
+
+// `start` optionally places the ghost at a world position instead of the
+// far corner -- used by the coffin, which decides where its ghost appears.
+export async function spawnGhost({
+  scene, level, start: startAt = null, target = null, onAttack = null, glow: parkedGlow = null,
+}) {
+  const { model: source, clips } = await preloadGhost();
+
+  const group = new THREE.Group();
+  scene.add(group);
+
+  // Object3D.clone() would hand the copy the original's skeleton and the two
+  // would animate as one, so skinned meshes need SkeletonUtils. It shares the
+  // materials, which these must not be: the emergence fade, the hit flash and
+  // the death dissolve all write to them, and a banished ghost would leave the
+  // next one dimmed. Cloning a material keeps its maps, so this costs no upload.
+  const model = cloneSkinned(source);
+  model.traverse((o) => { if (o.isMesh) o.material = o.material.clone(); });
   group.add(model);
 
   const mixer = new THREE.AnimationMixer(model);
   const actions = {};
-  const addClip = (name, clip) => {
-    if (!clip) return;
-    stripHorizontalRootMotion(clip);
+  for (const [name, clip] of Object.entries(clips)) {
+    if (!clip) continue;
     const action = mixer.clipAction(clip);
     if (ONE_SHOTS.has(name)) {
       action.setLoop(THREE.LoopOnce, 1);
       action.clampWhenFinished = true;
     }
     actions[name] = action;
-  };
-  addClip('walk', base.animations[0]);
+  }
 
   // A cold light travelling with it, so the rooms react as it drifts past.
-  const glow = new THREE.PointLight(0x86c5ff, 5, 6, 2);
-  glow.position.y = 1.2;
-  group.add(glow);
+  //
+  // Handed in rather than created: a light entering or leaving the scene
+  // changes three's light count and recompiles every material in it, ~80 ms --
+  // which would land on the frame the ghost comes out of the coffin. So it
+  // lives in the scene from boot and is flown along with the ghost instead of
+  // parented to it, which also keeps it out of the scene when the ghost leaves.
+  const glow = parkedGlow ?? addOwnLight(scene);
+  glow.distance = 6;
+  glow.decay = 2;
+  const syncGlow = () => glow.position.set(group.position.x, group.position.y + 1.2, group.position.z);
+  syncGlow();
 
   // --- navigation -----------------------------------------------------------
 
@@ -251,13 +309,6 @@ export async function spawnGhost({ scene, level, start: startAt = null, target =
   const materials = [];
   model.traverse((o) => { if (o.isMesh) materials.push(o.material); });
 
-  // The remaining clips stream in after the ghost is already walking.
-  Promise.all(
-    Object.entries(CLIP_FILES).map(([name, file]) =>
-      loader.loadAsync(`${DIR}/${file}`).then((g) => addClip(name, g.animations[0]))
-    )
-  ).catch((err) => console.error('ghost clips failed to load', err));
-
   play('walk');
   retarget();
 
@@ -327,6 +378,9 @@ export async function spawnGhost({ scene, level, start: startAt = null, target =
 
   function update(dt) {
     mixer.update(dt);
+    // A frame behind the ghost, which at these speeds is a couple of
+    // centimetres -- cheaper than syncing after every early return below.
+    syncGlow();
 
     if (dead) {
       // Settle onto the floor -- the death clip drops the body, and the idle
