@@ -99,10 +99,8 @@ export async function buildManor({ scene, renderer }) {
     geometry.computeBoundingBox();
     geometry.computeVertexNormals();
 
-    const base = `${def.tex}_Base_color.png`;
-    const alt = `${def.tex}_Albedo.png`;
     const material = new THREE.MeshStandardMaterial({
-      map: texture(def.tex.startsWith('Mansion') ? alt : base, true),
+      map: texture(`${def.tex}_Base_color.png`, true),
       normalMap: texture(`${def.tex}_Normal.png`),
       roughnessMap: texture(`${def.tex}_Roughness.png`),
       metalnessMap: texture(`${def.tex}_Metallic.png`),
@@ -250,7 +248,7 @@ export async function buildManor({ scene, renderer }) {
   }
 
   // Floor and ceiling, reusing the wall stone so the rooms read as one build.
-  const floorTex = texture('MansionWall_Albedo.png', true);
+  const floorTex = texture('MansionWall_Base_color.png', true);
   floorTex.wrapS = floorTex.wrapT = THREE.RepeatWrapping;
   floorTex.repeat.set(cols / 2, rows / 2);
 

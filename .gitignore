@@ -8,3 +8,6 @@ dist
 # assets/manor/derived IS tracked: it is what the level actually loads, so a
 # fresh clone runs without needing the raw manor pack. Regenerate it with
 # `npm run prepare-assets` when the source textures change.
+
+# macOS Finder cruft
+.DS_Store

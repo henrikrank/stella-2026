@@ -54,8 +54,10 @@ for await (const file of walk(SRC)) {
   if (!size) continue;
 
   // Flatten to derived/<AssetName>_<Map>.png so the loader needs no knowledge
-  // of the (inconsistent) source folder layout.
-  const out = path.join(OUT, path.basename(file));
+  // of the (inconsistent) source folder layout. The pack also names the colour
+  // map _Albedo on some assets and _Base_color on others; normalise to one so
+  // the loader has a single name to ask for.
+  const out = path.join(OUT, path.basename(file).replace(/_Albedo\.png$/i, '_Base_color.png'));
   await mkdir(OUT, { recursive: true });
 
   if (existsSync(out)) {

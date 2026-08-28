@@ -33,21 +33,10 @@ jobs:
         run: npm ci
 
       - name: Build
-        # Where the site is served from decides the base path, and getting it
-        # wrong 404s every script and asset:
-        #   custom domain (CNAME present) -> served from the root
-        #   plain project site            -> served from /<repo>/
-        # Deriving it from the CNAME file keeps the two in step instead of
-        # hard-coding a prefix that only suits one of them.
-        run: |
-          if [ -f CNAME ]; then
-            export VITE_BASE=/
-            echo "custom domain $(cat CNAME) -> base /"
-          else
-            export VITE_BASE="/${{ github.event.repository.name }}/"
-            echo "project site -> base $VITE_BASE"
-          fi
-          npm run build
+        # No base path to pass: vite.config.js builds relative URLs, so the same
+        # artifact works at henrikrank.github.io/<repo>/ and at a custom
+        # domain's root without knowing which one it landed on.
+        run: npm run build
 
       - uses: actions/configure-pages@v5
 
