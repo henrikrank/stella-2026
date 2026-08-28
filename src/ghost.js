@@ -138,7 +138,10 @@ export async function spawnGhost({ scene, level, start: startAt = null, target =
   for (let r = 0; r < rows; r++) {
     const row = [];
     for (let c = 0; c < cols; c++) {
-      row.push(!isBlocked(cellX(c), cellZ(r), level.colliders, RADIUS));
+      // Must be real floor *and* clear of furniture. Checking only the
+      // colliders would let it wander into the void beyond the walls, which is
+      // empty in the generated plans.
+      row.push(level.isFloor(cellX(c), cellZ(r)) && !isBlocked(cellX(c), cellZ(r), level.colliders, RADIUS));
     }
     walkable.push(row);
   }
@@ -154,11 +157,41 @@ export async function spawnGhost({ scene, level, start: startAt = null, target =
     c: Math.min(cols - 1, Math.max(0, Math.floor((v.x - minX) / NAV_CELL))),
   });
 
-  // Breadth-first search: the grid is ~1700 cells, so this is cheap enough to
-  // run on arrival without a frame budget worth worrying about.
+  const key = (r, c) => r * cols + c;
+
+  /** Flood fills from `from`, returning the predecessor map of every cell reached. */
+  function flood(from) {
+    const prev = new Map([[key(from.r, from.c), null]]);
+    const queue = [from];
+    for (let head = 0; head < queue.length; head++) {
+      const cur = queue[head];
+      for (const [dr, dc] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+        const r = cur.r + dr;
+        const c = cur.c + dc;
+        if (r < 0 || c < 0 || r >= rows || c >= cols) continue;
+        if (!walkable[r][c] || prev.has(key(r, c))) continue;
+        prev.set(key(r, c), cur);
+        queue.push({ r, c });
+      }
+    }
+    return prev;
+  }
+
+  /** Walks a predecessor map back from `cell` into a list of world points. */
+  function rebuild(prev, cell) {
+    const path = [];
+    let node = cell;
+    while (node) {
+      path.unshift(new THREE.Vector3(cellX(node.c), 0, cellZ(node.r)));
+      node = prev.get(key(node.r, node.c));
+    }
+    return path.length > 1 ? path : null;
+  }
+
+  // Breadth-first search: stops as soon as it reaches the goal, so a chase
+  // repath costs far less than a full flood.
   function findPath(from, to) {
     if (!walkable[to.r][to.c]) return null;
-    const key = (r, c) => r * cols + c;
     const prev = new Map();
     const seen = new Set([key(from.r, from.c)]);
     const queue = [from];
@@ -462,33 +495,36 @@ export async function spawnGhost({ scene, level, start: startAt = null, target =
   }
 
   /**
-   * Picks somewhere to bolt to: reachable, and putting real distance between
-   * it and the player. Sampling beats scanning every cell, and the retreat is
-   * recomputed often enough that a mediocre pick corrects itself.
+   * Picks somewhere to bolt to: reachable, and putting real distance between it
+   * and the player.
+   *
+   * One flood fill from the ghost, then score everything it reached. Testing
+   * candidates with a separate search each was fine on a small map and became
+   * the frame budget on a large one -- forty floods of a 4,800 cell grid, every
+   * time it repathed.
    */
   function retreatCell() {
     if (!target) return null;
-    const from = toCell(group.position);
+
+    const prev = flood(toCell(group.position));
     let best = null;
     let bestScore = -Infinity;
 
-    for (let i = 0; i < 40; i++) {
-      const cell = open[Math.floor(Math.random() * open.length)];
+    for (const cell of open) {
       const gap = Math.hypot(cellX(cell.c) - target.position.x, cellZ(cell.r) - target.position.z);
       if (gap < FLEE_MIN_GAP) continue;
+      if (!prev.has(key(cell.r, cell.c))) continue; // not reachable
 
       // Far from the player, but not halfway across the manor.
       const trek = Math.hypot(cellX(cell.c) - group.position.x, cellZ(cell.r) - group.position.z);
       const score = gap - trek * 0.35;
-      if (score <= bestScore) continue;
-
-      const route = findPath(from, cell);
-      if (route && route.length > 1) {
-        best = route;
+      if (score > bestScore) {
         bestScore = score;
+        best = cell;
       }
     }
-    return best;
+
+    return best ? rebuild(prev, best) : null;
   }
 
   // Walks one step along the current path, advancing the waypoint on arrival.

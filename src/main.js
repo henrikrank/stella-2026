@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 import { buildManor, resolveCollisions, isBlocked } from './manor.js';
-import { spawnGhost, HITS_TO_BANISH } from './ghost.js';
+import { HITS_TO_BANISH } from './ghost.js';
 import { spawnAxe, randomRestingPlace } from './axe.js';
 import { createHaunting } from './coffin.js';
 import { asset } from './assets.js';
@@ -135,11 +135,21 @@ moon.castShadow = true;
 moon.shadow.mapSize.set(2048, 2048);
 moon.shadow.bias = -0.0005;
 moon.shadow.normalBias = 0.02;
-const s = moon.shadow.camera;
-s.left = -14; s.right = 14; s.top = 12; s.bottom = -12;
-s.near = 0.5; s.far = 40;
-s.updateProjectionMatrix();
 scene.add(moon);
+
+// The shadow frustum has to cover the whole floor plan, so it is sized from the
+// level once that is built rather than hardcoded to one map's dimensions.
+function fitShadowsToLevel() {
+  const s = moon.shadow.camera;
+  s.left = -level.bounds.x - 2;
+  s.right = level.bounds.x + 2;
+  s.top = level.bounds.z + 2;
+  s.bottom = -level.bounds.z - 2;
+  s.near = 0.5;
+  s.far = 60;
+  s.updateProjectionMatrix();
+  moon.position.set(level.bounds.x * 0.4, 16, level.bounds.z * 0.5);
+}
 
 /* ------------------------------------------------------------------ character */
 
@@ -280,6 +290,7 @@ const load = (url, onProgress) => new Promise((res, rej) => gltfLoader.load(url,
   try {
     statusEl.textContent = 'Building the manor...';
     level = await buildManor({ scene, renderer });
+    fitShadowsToLevel();
 
     // Base model first, so the character is on screen before the extra clips
     // finish streaming.
@@ -330,13 +341,20 @@ const load = (url, onProgress) => new Promise((res, rej) => gltfLoader.load(url,
       .then((a) => { axe = a; })
       .catch((err) => console.error('axe failed to spawn', err));
 
-    spawnGhost({ scene, level, target: character, onAttack: hurtPlayer })
-      .then((g) => { ghost = g; })
-      .catch((err) => console.error('ghost failed to spawn', err));
-
+    // There is exactly one ghost in the manor and the coffin brings it: no
+    // free-roaming ghost is spawned here, and each haunting clears the previous
+    // one before releasing the next.
+    //
     // Needs the level (for wall drop spots and colliders) and the character to
     // land beside; state.radius is measured in normalizeAndAdd, above.
-    haunting = createHaunting({ scene, level, character, characterRadius: state.radius });
+    haunting = createHaunting({
+      scene,
+      level,
+      character,
+      characterRadius: state.radius,
+      onAttack: hurtPlayer,
+      onGhost: (g) => { ghost = g; },
+    });
 
     const entries = Object.entries(CLIP_FILES);
     const loaded = await Promise.all(

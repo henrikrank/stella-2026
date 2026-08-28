@@ -152,6 +152,7 @@ export function randomRestingPlace(level, { away = null, minGap = 6, clearance =
   for (let attempt = 0; attempt < 400; attempt++) {
     const x = (Math.random() * 2 - 1) * spanX;
     const z = (Math.random() * 2 - 1) * spanZ;
+    if (!level.isFloor(x, z)) continue; // void outside the rooms is not a spot
     if (isBlocked(x, z, level.colliders, clearance)) continue;
     // Relax the distance requirement rather than fail if the level is tight.
     const gap = away ? Math.hypot(x - away.x, z - away.z) : Infinity;

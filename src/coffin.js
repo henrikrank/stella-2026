@@ -40,6 +40,10 @@ const GHOST_OPACITY = 0.42;
 // edge, so this only has to cover that resting gap, not a real overlap.
 const TOUCH_SLACK = 0.18;
 
+// How long the coffin sits shut after landing before it lets the ghost out.
+// Walking into it still opens it early.
+const SEAL_TIME = 3;
+
 // Seconds between hauntings, randomised in this range.
 const FIRST_DELAY = [7, 12];
 const REPEAT_DELAY = [26, 46];
@@ -51,7 +55,16 @@ const DROP_MAX = 7.5;
 const rand = (lo, hi) => lo + Math.random() * (hi - lo);
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 
-export function createHaunting({ scene, level, character, characterRadius = 0.4 }) {
+export function createHaunting({
+  scene,
+  level,
+  character,
+  characterRadius = 0.4,
+  // The haunting owns the only ghost in the manor, so it needs the wiring that
+  // makes one dangerous: who to hunt, and what to call when it lands a blow.
+  onAttack = null,
+  onGhost = null,
+}) {
   const group = new THREE.Group();
   scene.add(group);
 
@@ -78,6 +91,7 @@ export function createHaunting({ scene, level, character, characterRadius = 0.4 
     coffin: null,
     shudder: 0,
     baseYaw: 0,
+    sealed: 0,
     ghost: null,
     emergeAt: null,
     emerge: 0,
@@ -207,7 +221,11 @@ export function createHaunting({ scene, level, character, characterRadius = 0.4 
 
   function clear() {
     if (state.coffin) group.remove(state.coffin);
-    if (state.ghost) scene.remove(state.ghost.group);
+    if (state.ghost) {
+      // Only ever one ghost: the old one leaves with its coffin.
+      scene.remove(state.ghost.group);
+      onGhost?.(null);
+    }
     if (state.glow) group.remove(state.glow);
     if (state.dust) {
       group.remove(state.dust);
@@ -220,7 +238,7 @@ export function createHaunting({ scene, level, character, characterRadius = 0.4 
     }
     Object.assign(state, {
       vy: 0, dustVel: null,
-      coffin: null, shudder: 0, baseYaw: 0,
+      coffin: null, shudder: 0, baseYaw: 0, sealed: 0,
       ghost: null, emergeAt: null,
       collider: null, glow: null, dust: null, dustLife: 0, emerge: 0,
     });
@@ -264,8 +282,10 @@ export function createHaunting({ scene, level, character, characterRadius = 0.4 
 
     state.shake = 0.42;
 
-    // Sealed on landing now: Stella has to walk into it to let the ghost out.
+    // Shut on landing, and it opens on its own a few seconds later. Touching
+    // it just brings that forward.
     state.phase = 'sealed';
+    state.sealed = SEAL_TIME;
 
     state.shudder = SHUDDER_TIME;
 
@@ -324,7 +344,13 @@ export function createHaunting({ scene, level, character, characterRadius = 0.4 
 
     let spawned;
     try {
-      spawned = await spawnGhost({ scene, level, start: { x: ex, z: ez } });
+      spawned = await spawnGhost({
+        scene,
+        level,
+        start: { x: ex, z: ez },
+        target: character,
+        onAttack,
+      });
     } catch (err) {
       console.error('haunting: ghost failed to spawn', err);
       return;
@@ -337,6 +363,7 @@ export function createHaunting({ scene, level, character, characterRadius = 0.4 
     }
 
     state.ghost = spawned;
+    onGhost?.(spawned);
     state.emergeAt = { x: ex, z: ez };
     state.emerge = 0;
     setGhostOpacity(0);
@@ -379,7 +406,8 @@ export function createHaunting({ scene, level, character, characterRadius = 0.4 
         // A faint seep through the chains, so it reads as something waiting.
         state.glow.intensity = 0.9 + Math.sin(performance.now() * 0.003) * 0.35;
       }
-      if (touchingCoffin()) {
+      state.sealed -= dt;
+      if (state.sealed <= 0 || touchingCoffin()) {
         state.phase = 'opening';
         state.shake = 0.3;
         state.shudder = SHUDDER_TIME;

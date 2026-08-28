@@ -1,41 +1,33 @@
 import * as THREE from 'three';
 import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js';
 import { asset } from './assets.js';
+import { generatePlan } from './plan.js';
 
 /**
  * Builds the manor level from the OBJ pack.
  *
  * The pack is authored in real-world metres, Y-up, with every model's feet at
  * y = 0, and the wall is a 1 m x 3 m module. That makes a 1 m grid the natural
- * unit, so the floor plan below is literally the level: one character per
- * square metre. Edit the map, get a different manor.
+ * unit, so the floor plan is literally the level: one character per square
+ * metre. The plan itself is generated fresh each run -- see plan.js.
  */
 
 const CELL = 1;
 
+// Every point light is evaluated per fragment by every lit material, so a manor
+// this size cannot give one to each lamp and candle -- that was 32 lights, which
+// a phone would not thank us for. Lamps claim them first, candles take what is
+// left, and the rest are unlit props (the flames still read as bright specks).
+const MAX_POINT_LIGHTS = 14;
+
 // # wall   P pillar   . floor
 // T dining table   c chair   B book case   S side table (short)   L side table (long)
 // f floor lamp   H heater   p painting (wall-mounted)
-const PLAN = [
-  '########################',
-  '#p.........B..B..B..B.p#',
-  '#.........P......P.....#',
-  '#......................#',
-  '#..f...................#',
-  '#......c...............#',
-  '#.....cTc..............#',
-  '#......c.......S....S..#',
-  '#......................#',
-  '#.........P......P.....#',
-  '#H....................f#',
-  '###########..###########',
-  '#..B..B................#',
-  '#.....................p#',
-  '#.....................f#',
-  '#pfL...............H...#',
-  '#......................#',
-  '########################',
-];
+//
+// Three chambers along the north wing, a long east-west corridor across the
+// middle, and four rooms below it either side of a north-south corridor. Every
+// room opens onto a corridor, and the two cross-passages (rows 15 and 24) link
+// the southern blocks so there is more than one way around.
 
 // obj: path under the pack. tex: basename of the texture set (the loader reads
 // from the flattened derived/ folder, which sidesteps the fact that the source
@@ -60,7 +52,13 @@ const BOOKS = { obj: 'Props/Books/Books.obj', tex: 'Books' };
 const SRC = asset('assets/manor/assets');
 const TEX = asset('assets/manor/derived');
 
-export async function buildManor({ scene, renderer }) {
+export async function buildManor({ scene, renderer, seed }) {
+  // ?seed=123 reproduces a layout exactly, which is what makes a randomised
+  // manor debuggable.
+  const fromUrl = Number(new URLSearchParams(location.search).get('seed'));
+  const plan = generatePlan(Number.isFinite(fromUrl) && fromUrl ? { seed: fromUrl } : seed ? { seed } : {});
+  const PLAN = plan.rows;
+
   const rows = PLAN.length;
   const cols = PLAN[0].length;
   const bad = PLAN.findIndex((r) => r.length !== cols);
@@ -121,6 +119,17 @@ export async function buildManor({ scene, renderer }) {
   // Grid -> world. The plan is centred on the origin.
   const worldX = (c) => (c - (cols - 1) / 2) * CELL;
   const worldZ = (r) => (r - (rows - 1) / 2) * CELL;
+
+  // Absence of a collider is not the same as floor any more: the generated plan
+  // leaves void outside the rooms, which has no colliders in it but is not
+  // somewhere anything should stand. Callers ask this instead.
+  const openCell = PLAN.map((row) => [...row].map((ch) => ch !== ' ' && ch !== '#'));
+  const isFloor = (x, z) => {
+    const c = Math.round(x / CELL + (cols - 1) / 2);
+    const r = Math.round(z / CELL + (rows - 1) / 2);
+    return openCell[r]?.[c] ?? false;
+  };
+
 
   const root = new THREE.Group();
   scene.add(root);
@@ -212,7 +221,7 @@ export async function buildManor({ scene, renderer }) {
         });
       }
 
-      if (def.light === 'lamp') {
+      if (def.light === 'lamp' && lights.length < MAX_POINT_LIGHTS) {
         const lamp = new THREE.PointLight(0xffb570, 14, 9, 2);
         lamp.position.set(mesh.position.x, proto.size.y * 0.92, mesh.position.z);
         lights.push(lamp);
@@ -232,11 +241,14 @@ export async function buildManor({ scene, renderer }) {
     candle.position.set(s.x + 0.12, s.top, s.z - 0.1);
     root.add(candle);
 
-    // A candle that lights nothing is just a stick; give it a small flame.
-    const flame = new THREE.PointLight(0xffa54a, 2.2, 3.2, 2);
-    flame.position.set(candle.position.x, s.top + candleProto.size.y + 0.05, candle.position.z);
-    root.add(flame);
-    lights.push(flame);
+    // A candle that lights nothing is just a stick -- give it a flame while
+    // there is budget for one.
+    if (lights.length < MAX_POINT_LIGHTS) {
+      const flame = new THREE.PointLight(0xffa54a, 2.2, 3.2, 2);
+      flame.position.set(candle.position.x, s.top + candleProto.size.y + 0.05, candle.position.z);
+      root.add(flame);
+      lights.push(flame);
+    }
 
     if (s.size.x > 1) {
       const books = new THREE.Mesh(booksProto.geometry, booksProto.material);
@@ -248,30 +260,75 @@ export async function buildManor({ scene, renderer }) {
   }
 
   // Floor and ceiling, reusing the wall stone so the rooms read as one build.
+  // Laid cell by cell rather than as one big plane: the generated plans leave
+  // void between the rooms, and a full-size plane carpets that too -- visible
+  // the moment anyone looks down at the manor from outside.
   const floorTex = texture('MansionWall_Base_color.png', true);
   floorTex.wrapS = floorTex.wrapT = THREE.RepeatWrapping;
-  floorTex.repeat.set(cols / 2, rows / 2);
 
   const floor = new THREE.Mesh(
-    new THREE.PlaneGeometry(cols * CELL, rows * CELL),
+    slabGeometry(0, false),
     new THREE.MeshStandardMaterial({ map: floorTex, roughness: 0.95, metalness: 0 })
   );
-  floor.rotation.x = -Math.PI / 2;
   floor.receiveShadow = true;
   root.add(floor);
 
   const ceiling = new THREE.Mesh(
-    new THREE.PlaneGeometry(cols * CELL, rows * CELL),
+    slabGeometry(3, true),
     new THREE.MeshStandardMaterial({ color: 0x1b1712, roughness: 1, metalness: 0 })
   );
-  ceiling.rotation.x = Math.PI / 2;
-  ceiling.position.y = 3;
   root.add(ceiling);
 
-  // Spawn in the middle of the great hall, clear of the table.
-  const spawn = new THREE.Vector3(worldX(3), 0, worldZ(8));
+  // The generator nominates a clear cell inside the first room.
+  const spawn = new THREE.Vector3(worldX(plan.spawn.c), 0, worldZ(plan.spawn.r));
 
-  return { root, colliders, lights, spawn, bounds: { x: (cols * CELL) / 2, z: (rows * CELL) / 2 } };
+  return {
+    root,
+    colliders,
+    lights,
+    spawn,
+    seed: plan.seed,
+    isFloor,
+    bounds: { x: (cols * CELL) / 2, z: (rows * CELL) / 2 },
+  };
+
+  /**
+   * One quad per open cell at height `y`, merged into a single geometry so the
+   * whole floor is still one draw call. `flip` reverses the winding for the
+   * ceiling, which is looked at from below.
+   */
+  function slabGeometry(y, flip) {
+    const position = [];
+    const uv = [];
+    const index = [];
+    let v = 0;
+
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        if (!openCell[r][c]) continue;
+
+        const x0 = worldX(c) - CELL / 2;
+        const x1 = x0 + CELL;
+        const z0 = worldZ(r) - CELL / 2;
+        const z1 = z0 + CELL;
+
+        position.push(x0, y, z0, x1, y, z0, x1, y, z1, x0, y, z1);
+        // UVs from world position, so the stone runs continuously across cells.
+        uv.push(x0 / 2, z0 / 2, x1 / 2, z0 / 2, x1 / 2, z1 / 2, x0 / 2, z1 / 2);
+
+        if (flip) index.push(v, v + 1, v + 2, v, v + 2, v + 3);
+        else index.push(v, v + 2, v + 1, v, v + 3, v + 2);
+        v += 4;
+      }
+    }
+
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(position, 3));
+    geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+    geometry.setIndex(index);
+    geometry.computeVertexNormals();
+    return geometry;
+  }
 
   function nearestWallDir(r, c) {
     const dirs = [
