@@ -1,5 +1,6 @@
 node_modules
 dist
+.idea/
 
 # Large binary manor assets are fetched separately, not versioned here.
 **/manor/assets
