@@ -12,7 +12,7 @@
 //   - manor Textures*/    (65 MB) the 2048px sources; the level loads the
 //                         downscaled copies in manor/derived instead
 
-import { cp, mkdir, readdir, stat } from 'node:fs/promises';
+import { cp, mkdir, readdir, readFile, stat } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 
@@ -55,3 +55,10 @@ if (!existsSync(SRC)) {
 
 await walk(SRC, OUT);
 console.log(`copied ${files} asset files (${(bytes / 1e6).toFixed(1)} MB) into ${OUT}`);
+
+// A custom domain needs its CNAME inside the published output, or Pages drops
+// the domain on the next deploy and falls back to the github.io URL.
+if (existsSync('CNAME')) {
+  await cp('CNAME', 'dist/CNAME');
+  console.log(`published CNAME (${(await readFile('CNAME', 'utf8')).trim()})`);
+}

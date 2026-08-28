@@ -33,11 +33,21 @@ jobs:
         run: npm ci
 
       - name: Build
-        # A project site lives under /<repo>/, so the asset URLs need that
-        # prefix baked in (see src/assets.js).
-        env:
-          VITE_BASE: /${{ github.event.repository.name }}/
-        run: npm run build
+        # Where the site is served from decides the base path, and getting it
+        # wrong 404s every script and asset:
+        #   custom domain (CNAME present) -> served from the root
+        #   plain project site            -> served from /<repo>/
+        # Deriving it from the CNAME file keeps the two in step instead of
+        # hard-coding a prefix that only suits one of them.
+        run: |
+          if [ -f CNAME ]; then
+            export VITE_BASE=/
+            echo "custom domain $(cat CNAME) -> base /"
+          else
+            export VITE_BASE="/${{ github.event.repository.name }}/"
+            echo "project site -> base $VITE_BASE"
+          fi
+          npm run build
 
       - uses: actions/configure-pages@v5
 
