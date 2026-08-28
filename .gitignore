@@ -4,5 +4,6 @@ dist
 # Large binary manor assets are fetched separately, not versioned here.
 **/manor/assets
 
-# Regenerated from the manor pack by `npm run prepare-assets`.
-**/manor/derived
+# assets/manor/derived IS tracked: it is what the level actually loads, so a
+# fresh clone runs without needing the raw manor pack. Regenerate it with
+# `npm run prepare-assets` when the source textures change.
