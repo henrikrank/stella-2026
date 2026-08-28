@@ -224,13 +224,14 @@ export async function spawnGhost({ scene, level }) {
   }
 
   /**
-   * Registers a hit from `source`. Returns the running hit count, or null if
-   * the ghost is already gone (so a flurry of punches can't overkill it).
+   * Registers a hit from `source`. A `lethal` hit (the axe) finishes it
+   * outright. Returns the running hit count, or null if the ghost is already
+   * gone, so a flurry of blows can't overkill it.
    */
-  function hit(source) {
+  function hit(source, lethal = false) {
     if (dead) return null;
 
-    hits++;
+    hits = lethal ? HITS_TO_BANISH : hits + 1;
     stun = STUN_TIME;
     path = null;
 

@@ -3,6 +3,7 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 import { buildManor, resolveCollisions, isBlocked } from './manor.js';
 import { spawnGhost, HITS_TO_BANISH } from './ghost.js';
+import { spawnAxe, restingPlace } from './axe.js';
 
 const ASSET_DIR = '/assets/characters/main-character';
 
@@ -32,6 +33,9 @@ const IDLE_FRAME_TIME = 0.0;
 // Filled in once the manor is built; the level's walls are the bounds now.
 let level = null;
 let ghost = null;
+let axe = null;
+let handBone = null;
+let handRestQuat = null;
 const CHARACTER_HEIGHT = 1.8;
 
 // Tuned against the walk cycle: at 1.8 the clip plays near 1.2x, which keeps
@@ -47,19 +51,10 @@ const GRAVITY = 12;
 // pokes through a surface.
 const CAMERA_MARGIN = 0.35;
 
-// The camera sits behind the character and drifts back into place on its own.
-// Soft, not rigid: a proportional pull with a ceiling on how fast it can swing,
-// so it trails the turn instead of snapping to it.
-const FOLLOW_GAIN = 2.4;
-const FOLLOW_MAX_RATE = 2.2; // rad/s
-const FOLLOW_DEADZONE = 0.04; // rad; stops micro-jitter when nearly aligned
-const FOLLOW_DELAY = 0.7; // s of no dragging before the camera takes over again
-// Input within this cone of camera-forward counts as "running forwards".
-const FOLLOW_CONE = Math.PI / 4;
-
-// Standing still, the character turns to match the camera instead: whichever
-// one the player is actively steering leads, and the other follows.
-const TURN_TO_CAMERA = 4.5; // rad/s
+// The camera is the one steering: the character turns to match it, softly, so
+// the view is always over her shoulder. A/D and drag rotate the pair together.
+const TURN_TO_CAMERA = 7.0; // rad/s
+const TURN_RATE = 2.4; // rad/s, how fast A/D swing the view around
 
 // Combat. The strike lands partway through the punch clip rather than on the
 // keypress, so the hit connects when the arm is actually out.
@@ -71,6 +66,9 @@ const PUNCH_ARC = Math.PI / 2.2; // the ghost must be in front, not behind
 // again well before its clip ends.
 const PUNCH_HOLD = 1.0; // s the punch animation stays in control
 const PUNCH_COOLDOWN = 0.5; // s before another punch can be thrown
+// Bare fists wear the ghost down over HITS_TO_BANISH blows; the axe ends it in
+// one, which is the whole point of going to fetch it.
+const AXE_IS_LETHAL = true;
 
 /* ------------------------------------------------------------------ renderer */
 
@@ -134,6 +132,7 @@ const state = {
   strikeAt: 0, // countdown to the moment this punch connects
   hits: 0,
   over: false,
+  armed: false,
 };
 
 let mixer = null;
@@ -144,7 +143,7 @@ let current = null;
 
 const keys = new Set();
 const MOVE_KEYS = new Set([
-  'KeyW', 'KeyA', 'KeyS', 'KeyD',
+  'KeyW', 'KeyA', 'KeyS', 'KeyD', 'KeyQ', 'KeyE',
   'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight',
   'Space',
 ]);
@@ -169,11 +168,10 @@ addEventListener('keydown', (e) => {
 addEventListener('blur', () => keys.clear());
 
 // Orbit camera: yaw/pitch around the character, mouse or touch drag.
-const orbit = { yaw: Math.PI * 0.15, pitch: 0.28, distance: 4.2, dragging: false, lastX: 0, lastY: 0, sinceDrag: FOLLOW_DELAY };
+const orbit = { yaw: Math.PI * 0.15, pitch: 0.28, distance: 4.2, dragging: false, lastX: 0, lastY: 0, };
 
 canvas.addEventListener('pointerdown', (e) => {
   orbit.dragging = true;
-  orbit.sinceDrag = 0;
   orbit.lastX = e.clientX;
   orbit.lastY = e.clientY;
   canvas.setPointerCapture(e.pointerId);
@@ -184,11 +182,9 @@ canvas.addEventListener('pointermove', (e) => {
   orbit.pitch = clamp(orbit.pitch + (e.clientY - orbit.lastY) * 0.005, -0.2, 1.2);
   orbit.lastX = e.clientX;
   orbit.lastY = e.clientY;
-  orbit.sinceDrag = 0;
 });
 const endDrag = (e) => {
   orbit.dragging = false;
-  orbit.sinceDrag = 0;
   if (e.pointerId !== undefined && canvas.hasPointerCapture?.(e.pointerId)) {
     canvas.releasePointerCapture(e.pointerId);
   }
@@ -248,6 +244,14 @@ const load = (url, onProgress) => new Promise((res, rej) => gltfLoader.load(url,
     mixer.addEventListener('finished', onceFinished);
     play('idle', 0);
 
+    // Solve the axe's grip against the idle pose rather than the bind pose:
+    // idle is a frozen frame she spends most of her time in, so the axe reads
+    // upright when standing and swings with the arm when she moves. The bind
+    // pose puts the hand somewhere she is never actually in.
+    mixer.update(0);
+    character.updateWorldMatrix(true, true);
+    if (handBone) handRestQuat = handBone.getWorldQuaternion(new THREE.Quaternion());
+
     loaderEl.classList.add('done');
     setTimeout(() => loaderEl.remove(), 700);
     hud.hidden = false;
@@ -255,6 +259,10 @@ const load = (url, onProgress) => new Promise((res, rej) => gltfLoader.load(url,
 
     // Remaining clips load in the background; each is pulled out of its file
     // and its skinned mesh discarded.
+    spawnAxe({ scene, level, position: restingPlace(level, new THREE.Vector3(0, 0, 5.5)) })
+      .then((a) => { axe = a; })
+      .catch((err) => console.error('axe failed to spawn', err));
+
     spawnGhost({ scene, level })
       .then((g) => { ghost = g; })
       .catch((err) => console.error('ghost failed to spawn', err));
@@ -358,6 +366,11 @@ function normalizeAndAdd(model) {
     mat.envMapIntensity = 0.9;
   });
 
+  // The rig's hand bone is where the axe will be parented once it's picked up.
+  model.traverse((o) => {
+    if (o.isBone && o.name === 'RightHand') handBone = o;
+  });
+
   modelPivot.add(model);
 
   // Collision radius from the body's depth, not the full footprint: the bind
@@ -389,11 +402,18 @@ function tick(dtOverride) {
   forward.set(Math.sin(orbit.yaw), 0, Math.cos(orbit.yaw));
   right.set(forward.z, 0, -forward.x);
 
+  // A/D turn rather than strafe: with the camera locked behind her, turning is
+  // what actually steers. Q/E keep a sidestep for when you want one.
+  const turn =
+    (keys.has('KeyA') || keys.has('ArrowLeft') ? 1 : 0) +
+    (keys.has('KeyD') || keys.has('ArrowRight') ? -1 : 0);
+  if (turn) orbit.yaw += turn * TURN_RATE * dt;
+
   desired.set(0, 0, 0);
   if (keys.has('KeyW') || keys.has('ArrowUp')) desired.add(forward);
   if (keys.has('KeyS') || keys.has('ArrowDown')) desired.sub(forward);
-  if (keys.has('KeyD') || keys.has('ArrowRight')) desired.sub(right);
-  if (keys.has('KeyA') || keys.has('ArrowLeft')) desired.add(right);
+  if (keys.has('KeyE')) desired.add(right);
+  if (keys.has('KeyQ')) desired.sub(right);
 
   const running = keys.has('ShiftLeft') || keys.has('ShiftRight');
   const speed = running ? RUN_SPEED : WALK_SPEED;
@@ -436,24 +456,18 @@ function tick(dtOverride) {
   // Turn to face the input direction rather than the velocity — velocity gets
   // zeroed against the walls, which would make the facing wobble when pushing
   // into one.
-  if (moving) {
-    state.facing = angleTowards(
-      state.facing,
-      Math.atan2(desired.x, desired.z),
-      TURN_SPEED * dt
-    );
-  } else {
-    // Idle: come around to wherever the camera is looking.
-    state.facing = angleTowards(state.facing, orbit.yaw, TURN_TO_CAMERA * dt);
-  }
+  // The camera owns the facing outright, so her back is always to it. Movement
+  // stays camera-relative, which means A/D/S now strafe and back up without
+  // turning her -- the trade for never seeing her front.
+  state.facing = angleTowards(state.facing, orbit.yaw, TURN_TO_CAMERA * dt);
   character.rotation.y = state.facing;
 
   const planarSpeed = Math.hypot(state.velocity.x, state.velocity.z);
   updateAnimation(planarSpeed, dt);
-  updateCameraFollow(dt, moving, desired);
 
   state.punchTimer = Math.max(0, state.punchTimer - dt);
   state.cooldown = Math.max(0, state.cooldown - dt);
+  updateAxe(dt);
   updateCombat(dt);
   ghost?.update(dt);
 
@@ -464,6 +478,11 @@ function tick(dtOverride) {
 function updateAnimation(speed, dt) {
   if (!mixer) return;
 
+  // Travelling against the way she faces means she is walking backwards.
+  const backwards =
+    speed > 0.1 &&
+    state.velocity.x * Math.sin(state.facing) + state.velocity.z * Math.cos(state.facing) < 0;
+
   if (!state.grounded) {
     play(state.punchTimer > 0 ? 'jumpPunch' : 'jump');
   } else if (state.punchTimer > 0) {
@@ -472,21 +491,37 @@ function updateAnimation(speed, dt) {
     play('idle', 0.25);
   } else if (speed <= WALK_SPEED + 0.2) {
     play('walk');
-    setRate('walk', speed);
+    setRate('walk', speed, backwards);
   } else {
     const clip = speed > RUN_SPEED * 0.85 ? 'runFast' : 'run';
     play(clip);
-    setRate(clip, speed);
+    setRate(clip, speed, backwards);
   }
 
   mixer.update(dt);
 }
 
 // Match cycle playback to real ground speed so the feet stop skating.
-function setRate(name, speed) {
+function setRate(name, speed, backwards = false) {
   const action = actions[name];
   if (!action) return;
-  action.setEffectiveTimeScale(clamp(speed / CLIP_SPEED[name], 0.6, 1.8));
+  // Reversing the clip when backing up beats moonwalking, and costs nothing.
+  const rate = clamp(speed / CLIP_SPEED[name], 0.6, 1.8);
+  action.setEffectiveTimeScale(backwards ? -rate : rate);
+}
+
+// Hovers the axe until the character walks into it, then puts it in her hand.
+function updateAxe(dt) {
+  if (!axe) return;
+  axe.update(dt);
+
+  if (axe.equipped || !handBone || !handRestQuat) return;
+  if (!axe.isNear(character.position)) return;
+
+  if (axe.attachTo(handBone, handRestQuat)) {
+    state.armed = true;
+    document.getElementById('tracker')?.classList.add('armed');
+  }
 }
 
 // Resolves a punch once it reaches its strike frame: the ghost has to be within
@@ -505,7 +540,7 @@ function updateCombat(dt) {
   if (Math.hypot(dx, dz) > PUNCH_REACH) return;
   if (Math.abs(angleDelta(Math.atan2(dx, dz), state.facing)) > PUNCH_ARC) return;
 
-  const hits = ghost.hit(character.position);
+  const hits = ghost.hit(character.position, state.armed && AXE_IS_LETHAL);
   if (hits === null) return;
 
   state.hits = hits;
@@ -525,37 +560,6 @@ function endGame() {
   state.over = true;
   // Let the death animation play before the card lands.
   setTimeout(() => overlayEl?.classList.add('show'), 1400);
-}
-
-// Eases the camera back behind the character while she is running forwards.
-//
-// Deliberately skipped while strafing: movement input is camera-relative, so if
-// the camera chased a sideways facing it would rotate the input frame, which
-// rotates the facing again -- the character would curve away on a held strafe
-// key. Recentering only when idle or running forwards keeps that loop open, and
-// the camera still swings in behind the moment the strafe key is released.
-function updateCameraFollow(dt, moving, dir) {
-  if (orbit.dragging) {
-    orbit.sinceDrag = 0;
-    return;
-  }
-  orbit.sinceDrag += dt;
-  if (orbit.sinceDrag < FOLLOW_DELAY) return;
-
-  // Standing still, the character turns to the camera instead -- if both moved
-  // at once they would meet in the middle and neither would end up where the
-  // player pointed.
-  if (!moving) return;
-
-  const inputAngle = Math.atan2(dir.x, dir.z);
-  if (Math.abs(angleDelta(inputAngle, orbit.yaw)) > FOLLOW_CONE) return;
-
-  const diff = angleDelta(state.facing, orbit.yaw);
-  if (Math.abs(diff) < FOLLOW_DEADZONE) return;
-
-  const step = diff * FOLLOW_GAIN * dt;
-  const cap = FOLLOW_MAX_RATE * dt;
-  orbit.yaw += clamp(step, -cap, cap);
 }
 
 function updateCamera(dt) {
@@ -630,6 +634,8 @@ window.stella = {
   THREE, scene, camera, renderer, character, state, orbit,
   get level() { return level; },
   get ghost() { return ghost; },
+  get axe() { return axe; },
+  get handBone() { return handBone; },
   step: tick,
   get actions() { return actions; },
   get current() { return current?._clip?.name ?? null; },
