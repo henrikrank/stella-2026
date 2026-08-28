@@ -15,11 +15,12 @@ const AXE_LENGTH = 1.9;
 const HELD_LENGTH = 0.85; // how long the axe should read in world metres
 const GRIP_ALONG_HANDLE = 0.34; // where on the shaft the hand closes, 0 = centre
 
-// Where the axe should point once held, in world terms: straight up, head
-// skyward. The grip rotation is solved from this against the rig's bind pose
-// rather than guessed as Euler angles, because the hand bone's local axes are
-// whatever the exporter decided they were.
-const HELD_DIRECTION = new THREE.Vector3(0, 1, 0);
+// Where the axe should point once held, in the character's own terms: pivoted
+// forward from vertical, head out in front of her rather than skyward. The grip
+// rotation is solved from this against the rig's rest pose rather than guessed
+// as Euler angles, because the hand bone's local axes are whatever the exporter
+// decided they were. +Z is her forward at the moment the grip is captured.
+const HELD_DIRECTION = new THREE.Vector3(0, 0, 1);
 const BLADE_ROLL = Math.PI / 2; // spin about the shaft so the blade faces out
 const HAND_OFFSET = new THREE.Vector3(0, 0.02, 0);
 
