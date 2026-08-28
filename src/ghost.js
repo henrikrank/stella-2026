@@ -28,6 +28,24 @@ const ONE_SHOTS = new Set(['hit', 'dead']);
 
 export const HITS_TO_BANISH = 3;
 const STUN_TIME = 1.15;
+
+// Hunting. The ghost notices the player inside AGGRO and gives up past LOSE --
+// the gap between the two stops it flickering between wandering and chasing
+// when the player sits right on the boundary.
+const AGGRO_RANGE = 7.5;
+const LOSE_RANGE = 11;
+const CHASE_SPEED = 2.9;
+const REACH = 1.15; // how close it must be to land a blow
+const SWIPE_COOLDOWN = 1.6; // seconds between blows
+const REPATH_INTERVAL = 0.35; // how often the chase path is recomputed
+
+// It strikes and withdraws rather than grinding away at the player: after a
+// blow (or after taking one) it breaks off and keeps its distance for a while
+// before closing in again.
+const FLEE_AFTER_SWIPE = 3.2; // seconds spent retreating after landing a blow
+const FLEE_AFTER_HIT = 4; // longer after being hit -- it has learnt something
+const FLEE_SPEED = 3.4; // faster than it chases; it is genuinely running
+const FLEE_MIN_GAP = 6; // how far away a retreat spot has to be
 const KNOCKBACK = 0.75;
 const FADE_TIME = 2.2;
 
@@ -42,7 +60,7 @@ const CLIP_SPEED = { walk: 1.5, run: 3.4 };
 
 // `start` optionally places the ghost at a world position instead of the
 // far corner -- used by the coffin, which decides where its ghost appears.
-export async function spawnGhost({ scene, level, start: startAt = null }) {
+export async function spawnGhost({ scene, level, start: startAt = null, target = null, onAttack = null }) {
   const loader = new GLTFLoader();
   const base = await loader.loadAsync(BASE_URL);
 
@@ -191,6 +209,11 @@ export async function spawnGhost({ scene, level, start: startAt = null }) {
   let stun = 0;
   let hits = 0;
   let dead = false;
+  let hunting = false;
+  let repathIn = 0;
+  let swipeIn = 0;
+  let fleeIn = 0;
+  let flash = 0;
   let fade = 0;
   const materials = [];
   model.traverse((o) => { if (o.isMesh) materials.push(o.material); });
@@ -263,6 +286,8 @@ export async function spawnGhost({ scene, level, start: startAt = null }) {
       play('dead', 0.12);
     } else {
       play('hit', 0.08);
+      // Back off once it has finished reeling.
+      startFleeing(FLEE_AFTER_HIT);
     }
     return hits;
   }
@@ -294,6 +319,12 @@ export async function spawnGhost({ scene, level, start: startAt = null }) {
     group.position.y = 0.06 + Math.sin(bob * 1.6) * 0.05;
     glow.intensity = 4.2 + Math.sin(bob * 2.7) * 1.1;
 
+    // Cold glow normally; hot for a moment after it lands a blow.
+    flash = Math.max(0, flash - dt);
+    glow.color.setHex(flash > 0 ? 0xff6a4a : 0x86c5ff);
+
+    if (hunt(dt)) return;
+
     if (pause > 0) {
       pause -= dt;
       if (pause <= 0) retarget();
@@ -308,9 +339,165 @@ export async function spawnGhost({ scene, level, start: startAt = null }) {
       return;
     }
 
-    const target = path[waypoint];
-    const dx = target.x - group.position.x;
-    const dz = target.z - group.position.z;
+    followPath(dt, running ? RUN_SPEED : WALK_SPEED, running ? 'run' : 'walk');
+  }
+
+  /**
+   * Chases the player. Returns true when it has taken the frame, leaving the
+   * wandering below untouched.
+   */
+  function hunt(dt) {
+    swipeIn = Math.max(0, swipeIn - dt);
+    if (!target) return false;
+
+    const dx = target.position.x - group.position.x;
+    const dz = target.position.z - group.position.z;
+    const range = Math.hypot(dx, dz);
+
+    // Hysteresis: a wide band to give up in, so it doesn't dither on the edge.
+    if (!hunting && range < AGGRO_RANGE) {
+      hunting = true;
+      path = null;
+      repathIn = 0;
+      pause = 0;
+    } else if (hunting && range > LOSE_RANGE) {
+      hunting = false;
+      path = null;
+      retarget();
+      return false;
+    }
+    if (!hunting) return false;
+
+    if (fleeIn > 0) {
+      fleeIn -= dt;
+
+      // Repath while retreating, so it keeps backing away as the player gives
+      // chase instead of running to one fixed spot and stopping there.
+      repathIn -= dt;
+      if (repathIn <= 0 || !path || waypoint >= path.length) {
+        repathIn = REPATH_INTERVAL;
+        const bolt = retreatCell();
+        if (bolt) {
+          path = bolt;
+          waypoint = 1;
+        }
+      }
+
+      play('run');
+      followPath(dt, FLEE_SPEED, 'run');
+      return true;
+    }
+
+    if (range <= REACH) {
+      // In reach: stop, square up, and swipe on the beat.
+      facing = angleTowards(facing, Math.atan2(dx, dz), TURN_SPEED * dt);
+      group.rotation.y = facing;
+      play('walk');
+      actions.walk?.setEffectiveTimeScale(0.35);
+
+      if (swipeIn <= 0) {
+        swipeIn = SWIPE_COOLDOWN;
+        flash = 0.35;
+        glow.intensity = 14;
+        onAttack?.(group.position);
+        startFleeing(FLEE_AFTER_SWIPE);
+      }
+      return true;
+    }
+
+    // Path to the player rather than steering straight at them, so walls and
+    // furniture route the chase instead of pinning it against a corner.
+    repathIn -= dt;
+    if (repathIn <= 0 || !path || waypoint >= path.length) {
+      repathIn = REPATH_INTERVAL;
+      // The player can stand where the ghost cannot fit (right against a wall,
+      // wedged by a chair), so aim at the nearest cell it can actually occupy.
+      const goal = nearestWalkable(toCell(target.position));
+      const found = goal && findPath(toCell(group.position), goal);
+      if (found && found.length > 1) {
+        path = found;
+        waypoint = 1;
+      }
+    }
+
+    play('run');
+    if (path && waypoint < path.length) {
+      followPath(dt, CHASE_SPEED, 'run');
+    } else {
+      // No route at all -- close the gap directly rather than standing still,
+      // which is what a frozen chase looks like.
+      const len = Math.hypot(dx, dz) || 1;
+      const nx = group.position.x + (dx / len) * CHASE_SPEED * dt;
+      const nz = group.position.z + (dz / len) * CHASE_SPEED * dt;
+      if (!isBlocked(nx, nz, level.colliders, RADIUS)) {
+        group.position.x = nx;
+        group.position.z = nz;
+      }
+      facing = angleTowards(facing, Math.atan2(dx, dz), TURN_SPEED * dt);
+      group.rotation.y = facing;
+    }
+    return true;
+  }
+
+  /** Nearest cell the ghost can stand in, spiralling out from `cell`. */
+  function nearestWalkable(cell) {
+    if (walkable[cell.r]?.[cell.c]) return cell;
+    for (let ring = 1; ring <= 6; ring++) {
+      for (let dr = -ring; dr <= ring; dr++) {
+        for (let dc = -ring; dc <= ring; dc++) {
+          if (Math.max(Math.abs(dr), Math.abs(dc)) !== ring) continue;
+          const r = cell.r + dr;
+          const c = cell.c + dc;
+          if (walkable[r]?.[c]) return { r, c };
+        }
+      }
+    }
+    return null;
+  }
+
+  function startFleeing(seconds) {
+    fleeIn = seconds;
+    path = null;
+    repathIn = 0;
+  }
+
+  /**
+   * Picks somewhere to bolt to: reachable, and putting real distance between
+   * it and the player. Sampling beats scanning every cell, and the retreat is
+   * recomputed often enough that a mediocre pick corrects itself.
+   */
+  function retreatCell() {
+    if (!target) return null;
+    const from = toCell(group.position);
+    let best = null;
+    let bestScore = -Infinity;
+
+    for (let i = 0; i < 40; i++) {
+      const cell = open[Math.floor(Math.random() * open.length)];
+      const gap = Math.hypot(cellX(cell.c) - target.position.x, cellZ(cell.r) - target.position.z);
+      if (gap < FLEE_MIN_GAP) continue;
+
+      // Far from the player, but not halfway across the manor.
+      const trek = Math.hypot(cellX(cell.c) - group.position.x, cellZ(cell.r) - group.position.z);
+      const score = gap - trek * 0.35;
+      if (score <= bestScore) continue;
+
+      const route = findPath(from, cell);
+      if (route && route.length > 1) {
+        best = route;
+        bestScore = score;
+      }
+    }
+    return best;
+  }
+
+  // Walks one step along the current path, advancing the waypoint on arrival.
+  function followPath(dt, speed, clip) {
+    const node = path[waypoint];
+    if (!node) return;
+
+    const dx = node.x - group.position.x;
+    const dz = node.z - group.position.z;
     const dist = Math.hypot(dx, dz);
 
     if (dist < ARRIVE) {
@@ -318,15 +505,13 @@ export async function spawnGhost({ scene, level, start: startAt = null }) {
       return;
     }
 
-    const speed = running ? RUN_SPEED : WALK_SPEED;
     group.position.x += (dx / dist) * speed * dt;
     group.position.z += (dz / dist) * speed * dt;
 
     facing = angleTowards(facing, Math.atan2(dx, dz), TURN_SPEED * dt);
     group.rotation.y = facing;
 
-    const clip = running ? 'run' : 'walk';
-    actions[clip]?.setEffectiveTimeScale(speed / CLIP_SPEED[clip]);
+    actions[clip]?.setEffectiveTimeScale(speed / (CLIP_SPEED[clip] ?? 1));
   }
 
   return {
@@ -336,7 +521,9 @@ export async function spawnGhost({ scene, level, start: startAt = null }) {
     get position() { return group.position; },
     get alive() { return !dead; },
     get hits() { return hits; },
-    get target() { return path?.[path.length - 1] ?? null; },
+    get destination() { return path?.[path.length - 1] ?? null; },
+    get hunting() { return hunting; },
+    get fleeing() { return fleeIn > 0; },
   };
 }
 

@@ -238,3 +238,51 @@ html, body { overscroll-behavior: none; }
    notch area. */
 body.touch #hud { display: none; }
 body.touch #tracker { top: max(18px, env(safe-area-inset-top)); }
+
+/* Player health ----------------------------------------------------------- */
+
+#hearts { display: flex; gap: 6px; }
+
+#hearts i {
+  width: 11px;
+  height: 11px;
+  border-radius: 3px;
+  background: #ff7a6a;
+  box-shadow: 0 0 10px rgba(255, 122, 106, .55);
+  transition: background .25s ease, box-shadow .25s ease, opacity .25s ease;
+}
+
+#hearts i.lost {
+  background: transparent;
+  border: 1px solid rgba(255, 122, 106, .35);
+  box-shadow: none;
+  opacity: .6;
+}
+
+.tracker-sep {
+  width: 1px;
+  height: 14px;
+  background: rgba(148, 190, 255, .22);
+}
+
+/* Damage flash ------------------------------------------------------------ */
+
+#hurt {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 12;
+  opacity: 0;
+  background: radial-gradient(ellipse at center, transparent 42%, rgba(190, 30, 30, .55) 100%);
+}
+
+#hurt.flash { animation: hurt-pulse .45s ease-out; }
+
+@keyframes hurt-pulse {
+  0% { opacity: 0; }
+  18% { opacity: 1; }
+  100% { opacity: 0; }
+}
+
+#gameover.lost .card h2 { color: #ff9d8f; }
+#gameover.lost button { background: #ff9d8f; border-color: rgba(255, 157, 143, .6); }

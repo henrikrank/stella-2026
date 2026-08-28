@@ -3,7 +3,7 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 import { buildManor, resolveCollisions, isBlocked } from './manor.js';
 import { spawnGhost, HITS_TO_BANISH } from './ghost.js';
-import { spawnAxe, restingPlace } from './axe.js';
+import { spawnAxe, randomRestingPlace } from './axe.js';
 import { createHaunting } from './coffin.js';
 import { asset } from './assets.js';
 import { isTouchDevice, setupTouchControls } from './touch.js';
@@ -84,6 +84,12 @@ const PUNCH_COOLDOWN = 0.5; // s before another punch can be thrown
 // one, which is the whole point of going to fetch it.
 const AXE_IS_LETHAL = true;
 
+// The ghost hits back. Brief invulnerability after a blow stops a single
+// encounter draining the whole bar, and gives the player time to swing or run.
+const MAX_HEALTH = 3;
+const INVULN_TIME = 1.4;
+const HURT_KNOCKBACK = 1.1;
+
 /* ------------------------------------------------------------------ renderer */
 
 const canvas = document.getElementById('app');
@@ -147,6 +153,8 @@ const state = {
   hits: 0,
   over: false,
   armed: false,
+  health: MAX_HEALTH,
+  invuln: 0,
 };
 
 let mixer = null;
@@ -304,11 +312,11 @@ const load = (url, onProgress) => new Promise((res, rej) => gltfLoader.load(url,
 
     // Remaining clips load in the background; each is pulled out of its file
     // and its skinned mesh discarded.
-    spawnAxe({ scene, level, position: restingPlace(level, new THREE.Vector3(0, 0, 5.5)) })
+    spawnAxe({ scene, level, position: randomRestingPlace(level, { away: level.spawn }) })
       .then((a) => { axe = a; })
       .catch((err) => console.error('axe failed to spawn', err));
 
-    spawnGhost({ scene, level })
+    spawnGhost({ scene, level, target: character, onAttack: hurtPlayer })
       .then((g) => { ghost = g; })
       .catch((err) => console.error('ghost failed to spawn', err));
 
@@ -528,6 +536,7 @@ function tick(dtOverride) {
 
   state.punchTimer = Math.max(0, state.punchTimer - dt);
   state.cooldown = Math.max(0, state.cooldown - dt);
+  state.invuln = Math.max(0, state.invuln - dt);
   updateAxe(dt);
   updateCombat(dt);
   ghost?.update(dt);
@@ -641,6 +650,41 @@ function updateCombat(dt) {
   if (hits >= HITS_TO_BANISH) endGame();
 }
 
+// Called by the ghost when a swipe connects.
+function hurtPlayer(from) {
+  if (state.over || state.invuln > 0) return;
+
+  state.health--;
+  state.invuln = INVULN_TIME;
+
+  // Shoved away from the ghost, but never into a wall.
+  const dx = character.position.x - from.x;
+  const dz = character.position.z - from.z;
+  const len = Math.hypot(dx, dz) || 1;
+  const nx = character.position.x + (dx / len) * HURT_KNOCKBACK;
+  const nz = character.position.z + (dz / len) * HURT_KNOCKBACK;
+  if (level && !isBlocked(nx, nz, level.colliders, state.radius)) {
+    character.position.x = nx;
+    character.position.z = nz;
+  }
+
+  updateHearts();
+  document.getElementById('hurt')?.classList.remove('flash');
+  // Reflow so the animation restarts even on back-to-back hits.
+  void document.getElementById('hurt')?.offsetWidth;
+  document.getElementById('hurt')?.classList.add('flash');
+
+  if (state.health <= 0) endGame(false);
+}
+
+function updateHearts() {
+  const el = document.getElementById('hearts');
+  if (!el) return;
+  for (const [i, heart] of [...el.children].entries()) {
+    heart.classList.toggle('lost', i >= state.health);
+  }
+}
+
 function updateHitPips() {
   if (!pipsEl) return;
   for (const [i, pip] of [...pipsEl.children].entries()) {
@@ -648,11 +692,22 @@ function updateHitPips() {
   }
 }
 
-function endGame() {
+function endGame(won = true) {
   if (state.over) return;
   state.over = true;
+
+  const title = document.getElementById('over-title');
+  const detail = document.getElementById('over-detail');
+  if (title && detail) {
+    title.textContent = won ? 'The manor is quiet again' : 'The manor keeps you';
+    detail.textContent = won
+      ? 'Three hits landed. The ghost is gone.'
+      : 'The ghost caught you in the dark.';
+  }
+  overlayEl?.classList.toggle('lost', !won);
+
   // Let the death animation play before the card lands.
-  setTimeout(() => overlayEl?.classList.add('show'), 1400);
+  setTimeout(() => overlayEl?.classList.add('show'), won ? 1400 : 900);
 }
 
 function updateCamera(dt) {

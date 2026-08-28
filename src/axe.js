@@ -140,6 +140,28 @@ export async function spawnAxe({ scene, level, position }) {
   };
 }
 
+/**
+ * Picks a random clear spot for the axe, kept well away from `away` (the
+ * player's spawn) so it has to be hunted for rather than tripped over.
+ */
+export function randomRestingPlace(level, { away = null, minGap = 6, clearance = 0.6 } = {}) {
+  const spanX = level.bounds.x - 1.5;
+  const spanZ = level.bounds.z - 1.5;
+
+  for (let attempt = 0; attempt < 400; attempt++) {
+    const x = (Math.random() * 2 - 1) * spanX;
+    const z = (Math.random() * 2 - 1) * spanZ;
+    if (isBlocked(x, z, level.colliders, clearance)) continue;
+    // Relax the distance requirement rather than fail if the level is tight.
+    const gap = away ? Math.hypot(x - away.x, z - away.z) : Infinity;
+    if (gap < minGap * (attempt < 200 ? 1 : 0.5)) continue;
+    return new THREE.Vector3(x, 0, z);
+  }
+
+  // Nothing random worked out; fall back to a known-good spot.
+  return restingPlace(level, new THREE.Vector3(0, 0, 5.5));
+}
+
 /** Finds a clear spot for the axe to rest, near `preferred` if possible. */
 export function restingPlace(level, preferred) {
   if (!isBlocked(preferred.x, preferred.z, level.colliders, 0.5)) return preferred;
