@@ -4,8 +4,9 @@ import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment
 import { buildManor, resolveCollisions, isBlocked } from './manor.js';
 import { spawnGhost, HITS_TO_BANISH } from './ghost.js';
 import { spawnAxe, restingPlace } from './axe.js';
+import { asset } from './assets.js';
 
-const ASSET_DIR = '/assets/characters/main-character';
+const ASSET_DIR = asset('assets/characters/main-character');
 
 // The rigged, skinned export drives everything now. The original
 // main-character.glb is a 3M-triangle scan with no skeleton, so it cannot be

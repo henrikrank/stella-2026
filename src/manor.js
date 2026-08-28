@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js';
+import { asset } from './assets.js';
 
 /**
  * Builds the manor level from the OBJ pack.
@@ -56,8 +57,8 @@ const ASSETS = {
 const CANDLE = { obj: 'Props/Candle/Candle.obj', tex: 'Candle' };
 const BOOKS = { obj: 'Props/Books/Books.obj', tex: 'Books' };
 
-const SRC = '/assets/manor/assets';
-const TEX = '/assets/manor/derived';
+const SRC = asset('assets/manor/assets');
+const TEX = asset('assets/manor/derived');
 
 export async function buildManor({ scene, renderer }) {
   const rows = PLAN.length;

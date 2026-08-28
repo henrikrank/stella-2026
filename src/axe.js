@@ -1,13 +1,14 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { isBlocked } from './manor.js';
+import { asset } from './assets.js';
 
 /**
  * The axe: lies in the manor until the player walks into it, then rides in the
  * character's right hand and turns a punch into a killing blow.
  */
 
-const URL = '/assets/weapons/axe.glb';
+const URL = asset('assets/weapons/axe.glb');
 
 // Source is 0.81 x 1.90 x 0.26 with the head at +Y and the pivot at its centre.
 const AXE_LENGTH = 1.9;

@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { isBlocked } from './manor.js';
+import { asset } from './assets.js';
 
 /**
  * A ghost that wanders the manor on its own.
@@ -11,7 +12,7 @@ import { isBlocked } from './manor.js';
  * grinding along walls.
  */
 
-const DIR = '/assets/characters/ghost';
+const DIR = asset('assets/characters/ghost');
 const BASE_URL = `${DIR}/ghost-biped-Animation-Walking-withSkin.glb`;
 const CLIP_FILES = {
   run: 'ghost-biped-Animation-Running-withSkin.glb',
