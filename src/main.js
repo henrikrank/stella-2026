@@ -1,19 +1,49 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
+import { buildManor, resolveCollisions, isBlocked } from './manor.js';
 
-const MODEL_URL = '/assets/characters/main-character/main-character.glb';
+const ASSET_DIR = '/assets/characters/main-character';
 
-// The box the character is confined to: half-extents on the ground plane.
-const ROOM = { half: 6, height: 5 };
+// The rigged, skinned export drives everything now. The original
+// main-character.glb is a 3M-triangle scan with no skeleton, so it cannot be
+// animated -- it stays in the repo as the high-res reference, unused here.
+const BASE_URL = `${ASSET_DIR}/main-character-biped-Animation-Walking-withSkin.glb`;
+
+// Every file ships the same 24-joint skeleton, so clips lifted out of one
+// load bind by joint name onto the base model's skeleton.
+const CLIP_FILES = {
+  run:        'main-character-biped-Animation-Running-withSkin.glb',
+  runFast:    'main-character-biped-Animation-RunFast-withSkin.glb',
+  jump:       'main-character-biped-Animation-Jump-Run-withSkin.glb',
+  punch:      'main-character-biped-Animation-Punch-Combo-2-withSkin.glb',
+  punchAlt:   'main-character-biped-Animation-Punch-Combo-5-withSkin.glb',
+  jumpPunch:  'main-character-biped-Animation-Jumping-Punch-withSkin.glb',
+};
+
+// Ground speed each locomotion clip was authored for, used to scale playback
+// so the feet don't skate. Tuned by eye against the in-place cycles.
+const CLIP_SPEED = { walk: 1.5, run: 3.4, runFast: 5.0 };
+
+// Seconds into the walk cycle used as the standing pose (see boot()).
+const IDLE_FRAME_TIME = 0.0;
+
+// Filled in once the manor is built; the level's walls are the bounds now.
+let level = null;
 const CHARACTER_HEIGHT = 1.8;
 
-const WALK_SPEED = 2.4;
+// Tuned against the walk cycle: at 1.8 the clip plays near 1.2x, which keeps
+// the stride reading as a walk instead of a speed-walk.
+const WALK_SPEED = 1.8;
 const RUN_SPEED = 5.0;
 const ACCEL = 14;
 const TURN_SPEED = 12;
 const JUMP_SPEED = 4.2;
 const GRAVITY = 12;
+
+// How far the camera keeps off walls and furniture, so the near plane never
+// pokes through a surface.
+const CAMERA_MARGIN = 0.35;
 
 /* ------------------------------------------------------------------ renderer */
 
@@ -26,59 +56,34 @@ renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.05;
 
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x0d1015);
-scene.fog = new THREE.Fog(0x0d1015, 16, 40);
+scene.background = new THREE.Color(0x070906);
+scene.fog = new THREE.Fog(0x070906, 12, 34);
 
 const pmrem = new THREE.PMREMGenerator(renderer);
 scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
 
 const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 200);
 
-/* ---------------------------------------------------------------------- room */
-
-const floor = new THREE.Mesh(
-  new THREE.PlaneGeometry(ROOM.half * 2, ROOM.half * 2),
-  new THREE.MeshStandardMaterial({ color: 0x2b3240, roughness: 0.92, metalness: 0 })
-);
-floor.rotation.x = -Math.PI / 2;
-floor.receiveShadow = true;
-scene.add(floor);
-
-const grid = new THREE.GridHelper(ROOM.half * 2, ROOM.half * 4, 0x55607a, 0x39415a);
-grid.position.y = 0.002;
-scene.add(grid);
-
-// Wireframe walls, so the box reads as a box without hiding the character.
-const box = new THREE.Mesh(
-  new THREE.BoxGeometry(ROOM.half * 2, ROOM.height, ROOM.half * 2),
-  new THREE.MeshBasicMaterial({ color: 0x3f4a63, wireframe: true, transparent: true, opacity: 0.35 })
-);
-box.position.y = ROOM.height / 2;
-scene.add(box);
-
 /* ------------------------------------------------------------------- lighting */
 
-scene.add(new THREE.HemisphereLight(0xbcd2ff, 0x2b3240, 0.7));
+// Interior, candle-lit: the manor's own lamps and candles do most of the work
+// (see buildManor), so this is just enough fill to keep the corners readable.
+scene.add(new THREE.HemisphereLight(0x5a6480, 0x1a1510, 0.5));
+scene.add(new THREE.AmbientLight(0xffd9b0, 0.18));
 
-const key = new THREE.DirectionalLight(0xffffff, 2.4);
-key.position.set(4, 8, 5);
-key.castShadow = true;
-key.shadow.mapSize.set(2048, 2048);
-key.shadow.bias = -0.0005;
-key.shadow.normalBias = 0.02;
-const s = key.shadow.camera;
-s.left = -ROOM.half - 1;
-s.right = ROOM.half + 1;
-s.top = ROOM.half + 1;
-s.bottom = -ROOM.half - 1;
-s.near = 0.5;
-s.far = 30;
+// One shadow-casting light for the whole level -- point-light shadows are
+// expensive and the lamps are numerous.
+const moon = new THREE.DirectionalLight(0x9fb6ff, 0.9);
+moon.position.set(6, 12, 8);
+moon.castShadow = true;
+moon.shadow.mapSize.set(2048, 2048);
+moon.shadow.bias = -0.0005;
+moon.shadow.normalBias = 0.02;
+const s = moon.shadow.camera;
+s.left = -14; s.right = 14; s.top = 12; s.bottom = -12;
+s.near = 0.5; s.far = 40;
 s.updateProjectionMatrix();
-scene.add(key);
-
-const rim = new THREE.DirectionalLight(0x7fa8ff, 0.8);
-rim.position.set(-5, 4, -6);
-scene.add(rim);
+scene.add(moon);
 
 /* ------------------------------------------------------------------ character */
 
@@ -97,8 +102,12 @@ const state = {
   grounded: true,
   facing: 0,
   radius: 0.4,
-  bob: 0,
+  punching: false,
 };
+
+let mixer = null;
+const actions = {};
+let current = null;
 
 /* ------------------------------------------------------------------- controls */
 
@@ -114,10 +123,20 @@ addEventListener('keydown', (e) => {
   keys.add(e.code);
 });
 addEventListener('keyup', (e) => keys.delete(e.code));
+
+// Punch is a one-shot rather than a held state, so it fires on the keypress
+// instead of being polled in the loop.
+addEventListener('keydown', (e) => {
+  if (e.code !== 'KeyF' || e.repeat || state.punching) return;
+  const clip = state.grounded ? (Math.random() < 0.5 ? 'punch' : 'punchAlt') : 'jumpPunch';
+  if (!actions[clip]) return;
+  state.punching = true;
+  play(clip, 0.1, true);
+});
 addEventListener('blur', () => keys.clear());
 
 // Orbit camera: yaw/pitch around the character, mouse or touch drag.
-const orbit = { yaw: Math.PI * 0.15, pitch: 0.28, distance: 7, dragging: false, lastX: 0, lastY: 0 };
+const orbit = { yaw: Math.PI * 0.15, pitch: 0.28, distance: 4.2, dragging: false, lastX: 0, lastY: 0 };
 
 canvas.addEventListener('pointerdown', (e) => {
   orbit.dragging = true;
@@ -142,7 +161,7 @@ canvas.addEventListener('pointerup', endDrag);
 canvas.addEventListener('pointercancel', endDrag);
 canvas.addEventListener('wheel', (e) => {
   e.preventDefault();
-  orbit.distance = clamp(orbit.distance + e.deltaY * 0.004, 2.5, 18);
+  orbit.distance = clamp(orbit.distance + e.deltaY * 0.004, 1.8, 9);
 }, { passive: false });
 
 /* --------------------------------------------------------------------- loader */
@@ -152,31 +171,114 @@ const barFill = document.getElementById('bar-fill');
 const statusEl = document.getElementById('loader-status');
 const hud = document.getElementById('hud');
 
-new GLTFLoader().load(
-  MODEL_URL,
-  (gltf) => {
-    normalizeAndAdd(gltf.scene);
-    loaderEl.classList.add('done');
-    setTimeout(() => loaderEl.remove(), 700);
-    hud.hidden = false;
-  },
-  (evt) => {
-    if (evt.total) {
+const gltfLoader = new GLTFLoader();
+const load = (url, onProgress) => new Promise((res, rej) => gltfLoader.load(url, res, onProgress, rej));
+
+(async function boot() {
+  try {
+    statusEl.textContent = 'Building the manor...';
+    level = await buildManor({ scene, renderer });
+
+    // Base model first, so the character is on screen before the extra clips
+    // finish streaming.
+    const base = await load(BASE_URL, (evt) => {
+      if (!evt.total) return;
       const pct = Math.round((evt.loaded / evt.total) * 100);
       barFill.style.width = `${pct}%`;
       statusEl.textContent = `${pct}%`;
-    } else {
-      statusEl.textContent = `${(evt.loaded / 1e6).toFixed(1)} MB`;
-    }
-  },
-  (err) => {
-    console.error(err);
-    statusEl.textContent = 'Failed to load model — see console.';
-  }
-);
+    });
 
-// The GLB is a raw scan: arbitrary scale, arbitrary origin. Rescale it to a
-// human height and drop its feet onto y = 0, centered on the controller.
+    normalizeAndAdd(base.scene);
+    character.position.copy(level.spawn);
+    mixer = new THREE.AnimationMixer(base.scene);
+
+    // The base file's own clip is the walk.
+    const walkClip = base.animations[0];
+    addClip('walk', walkClip);
+
+    // No idle animation ships with the character. Freeze a single frame of the
+    // walk instead of leaving the rig in its A-pose bind stance -- a clone,
+    // because clipAction caches per clip and would otherwise hand back the
+    // walk action itself.
+    const idleClip = walkClip.clone();
+    idleClip.name = 'idle';
+    addClip('idle', idleClip);
+    actions.idle.setEffectiveTimeScale(0);
+    actions.idle.time = IDLE_FRAME_TIME;
+
+    mixer.addEventListener('finished', onceFinished);
+    play('idle', 0);
+
+    loaderEl.classList.add('done');
+    setTimeout(() => loaderEl.remove(), 700);
+    hud.hidden = false;
+
+    // Remaining clips load in the background; each is pulled out of its file
+    // and its skinned mesh discarded.
+    const entries = Object.entries(CLIP_FILES);
+    const loaded = await Promise.all(
+      entries.map(([, file]) => load(`${ASSET_DIR}/${file}`).then((g) => g.animations[0]))
+    );
+    entries.forEach(([name], i) => addClip(name, loaded[i]));
+  } catch (err) {
+    console.error(err);
+    statusEl.textContent = 'Failed to load character — see console.';
+  }
+})();
+
+function addClip(name, clip) {
+  if (!clip) return;
+  // Jump_Run travels ~4 units sideways and ~7 forward over its length. The
+  // controller owns position, so that horizontal drift has to go or the model
+  // slides off its own feet; the vertical channel stays for the tuck.
+  if (name === 'jump' || name === 'jumpPunch') stripHorizontalRootMotion(clip);
+
+  const action = mixer.clipAction(clip);
+  if (name === 'jump' || name === 'punch' || name === 'punchAlt' || name === 'jumpPunch') {
+    action.setLoop(THREE.LoopOnce, 1);
+    action.clampWhenFinished = true;
+  }
+  actions[name] = action;
+}
+
+// Zero the X/Z components of the Hips translation track, keeping Y.
+function stripHorizontalRootMotion(clip) {
+  for (const track of clip.tracks) {
+    if (!/Hips\.position$/.test(track.name)) continue;
+    const v = track.values;
+    for (let i = 0; i < v.length; i += 3) {
+      v[i] = 0;
+      v[i + 2] = 0;
+    }
+  }
+}
+
+// `restart` replays an action that is already current -- used by punches, where
+// pressing again should throw the next punch rather than be swallowed.
+function play(name, fade = 0.18, restart = false) {
+  const next = actions[name];
+  if (!next || (next === current && !restart)) return;
+
+  if (current && current !== next) current.fadeOut(fade);
+  next.reset().setEffectiveWeight(1).fadeIn(fade).play();
+  // reset() rewinds to 0, so the frozen idle pose has to be re-seated after it.
+  if (next === actions.idle) next.time = IDLE_FRAME_TIME;
+  current = next;
+}
+
+// One-shots hand control back to locomotion when they finish. `current` is left
+// alone: clampWhenFinished holds the last frame, and re-nulling it here would
+// make the state machine retrigger the same clip on the very next frame.
+function onceFinished(e) {
+  if (e.action === actions.punch || e.action === actions.punchAlt || e.action === actions.jumpPunch) {
+    state.punching = false;
+  }
+}
+
+
+// Rescale the rig to a human height and drop its feet onto y = 0, centered on
+// the controller. The Armature already carries a 0.01 scale (the source is in
+// centimetres), so this is measured rather than assumed.
 function normalizeAndAdd(model) {
   model.updateWorldMatrix(true, true);
 
@@ -185,7 +287,7 @@ function normalizeAndAdd(model) {
   const center = bounds.getCenter(new THREE.Vector3());
 
   const scale = CHARACTER_HEIGHT / size.y;
-  model.scale.setScalar(scale);
+  model.scale.multiplyScalar(scale);
   model.position.set(
     -center.x * scale,
     -bounds.min.y * scale,
@@ -193,19 +295,30 @@ function normalizeAndAdd(model) {
   );
 
   model.traverse((o) => {
-    if (o.isMesh) {
-      o.castShadow = true;
-      o.receiveShadow = true;
-      o.frustumCulled = true;
-      if (o.material) o.material.envMapIntensity = 0.9;
-    }
+    if (!o.isMesh) return;
+    o.castShadow = true;
+    o.receiveShadow = true;
+    // Bounds are computed from the bind pose, so an animated limb reaching
+    // outside them would pop the whole mesh out of view.
+    o.frustumCulled = false;
+
+    const mat = o.material;
+    if (!mat) return;
+    // The export sets emissive to full white over the colour map and leaves
+    // metalness at the glTF default of 1, which renders the character self-lit
+    // and chrome. Put it back under the scene's lighting.
+    mat.emissiveIntensity = 0;
+    mat.metalness = 0;
+    mat.roughness = 0.85;
+    mat.envMapIntensity = 0.9;
   });
 
   modelPivot.add(model);
 
-  // Collision radius from the model's footprint, so it stops at the walls
-  // rather than clipping through them.
-  state.radius = (Math.max(size.x, size.z) * scale) / 2;
+  // Collision radius from the body's depth, not the full footprint: the bind
+  // pose holds the arms out, and measuring across them would stop her a whole
+  // arm span short of every wall.
+  state.radius = clamp((Math.min(size.x, size.z) * scale) / 2, 0.2, 0.6);
 
   character.position.set(0, 0, 0);
 }
@@ -248,15 +361,15 @@ function tick(dtOverride) {
   character.position.x += state.velocity.x * dt;
   character.position.z += state.velocity.z * dt;
 
-  // Keep the character inside the box.
-  const limit = ROOM.half - state.radius;
-  if (Math.abs(character.position.x) > limit) {
-    character.position.x = Math.sign(character.position.x) * limit;
-    state.velocity.x = 0;
-  }
-  if (Math.abs(character.position.z) > limit) {
-    character.position.z = Math.sign(character.position.z) * limit;
-    state.velocity.z = 0;
+  // Push back out of walls and furniture. Resolving position rather than
+  // cancelling velocity lets her slide along a wall instead of gluing to it.
+  if (level) {
+    const before = { x: character.position.x, z: character.position.z };
+    resolveCollisions(character.position, state.radius, level.colliders);
+    // Kill the velocity component that was absorbed, so she doesn't keep
+    // accelerating into a wall she cannot pass.
+    if (character.position.x !== before.x) state.velocity.x = 0;
+    if (character.position.z !== before.z) state.velocity.z = 0;
   }
 
   // Jump + gravity.
@@ -287,17 +400,39 @@ function tick(dtOverride) {
   }
   character.rotation.y = state.facing;
 
-  // The model has no animation clips, so movement gets a procedural bob and a
-  // slight lean into the direction of travel to sell the motion.
   const planarSpeed = Math.hypot(state.velocity.x, state.velocity.z);
-  const gait = planarSpeed / RUN_SPEED;
-  state.bob += dt * (6 + gait * 8);
-  modelPivot.position.y = state.grounded ? Math.abs(Math.sin(state.bob)) * 0.05 * gait : 0;
-  modelPivot.rotation.z = Math.sin(state.bob) * 0.03 * gait;
-  modelPivot.rotation.x = -gait * 0.08;
+  updateAnimation(planarSpeed, dt);
 
   updateCamera(dt);
   renderer.render(scene, camera);
+}
+
+function updateAnimation(speed, dt) {
+  if (!mixer) return;
+
+  if (!state.grounded) {
+    play(state.punching ? 'jumpPunch' : 'jump');
+  } else if (state.punching) {
+    // Held by the one-shot until its 'finished' event clears the flag.
+  } else if (speed < 0.1) {
+    play('idle', 0.25);
+  } else if (speed <= WALK_SPEED + 0.2) {
+    play('walk');
+    setRate('walk', speed);
+  } else {
+    const clip = speed > RUN_SPEED * 0.85 ? 'runFast' : 'run';
+    play(clip);
+    setRate(clip, speed);
+  }
+
+  mixer.update(dt);
+}
+
+// Match cycle playback to real ground speed so the feet stop skating.
+function setRate(name, speed) {
+  const action = actions[name];
+  if (!action) return;
+  action.setEffectiveTimeScale(clamp(speed / CLIP_SPEED[name], 0.6, 1.8));
 }
 
 function updateCamera(dt) {
@@ -310,6 +445,26 @@ function updateCamera(dt) {
     camTarget.y + Math.sin(orbit.pitch) * orbit.distance,
     camTarget.z - Math.cos(orbit.yaw) * horizontal
   );
+
+  // Indoors the camera would otherwise sit inside the walls. March out from
+  // the character and stop at the last clear point.
+  if (level) {
+    const steps = 12;
+    for (let i = 1; i <= steps; i++) {
+      const t = i / steps;
+      const x = camTarget.x + (target.x - camTarget.x) * t;
+      const z = camTarget.z + (target.z - camTarget.z) * t;
+      if (isBlocked(x, z, level.colliders, CAMERA_MARGIN)) {
+        const back = (i - 1) / steps;
+        target.set(
+          camTarget.x + (target.x - camTarget.x) * back,
+          camTarget.y + (target.y - camTarget.y) * back,
+          camTarget.z + (target.z - camTarget.z) * back
+        );
+        break;
+      }
+    }
+  }
 
   camera.position.lerp(target, 1 - Math.pow(0.001, dt));
   camera.lookAt(camTarget);
@@ -343,4 +498,11 @@ addEventListener('resize', resize);
 resize();
 
 // Handy for poking at the controller from the console.
-window.stella = { scene, camera, character, state, orbit, step: tick };
+window.stella = {
+  THREE, scene, camera, renderer, character, state, orbit,
+  get level() { return level; },
+  step: tick,
+  get actions() { return actions; },
+  get current() { return current?._clip?.name ?? null; },
+  get mixer() { return mixer; },
+};

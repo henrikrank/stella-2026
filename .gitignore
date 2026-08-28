@@ -2,4 +2,7 @@ node_modules
 dist
 
 # Large binary manor assets are fetched separately, not versioned here.
-# **/manor/assets
+**/manor/assets
+
+# Regenerated from the manor pack by `npm run prepare-assets`.
+**/manor/derived
