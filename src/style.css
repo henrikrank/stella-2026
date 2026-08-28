@@ -46,3 +46,83 @@ html, body {
 }
 .hud-keys { display: flex; flex-wrap: wrap; gap: 6px 22px; color: var(--muted); }
 .hud-keys b { color: var(--fg); font-weight: 600; }
+
+/* Hit tracker ------------------------------------------------------------- */
+
+#tracker {
+  position: fixed;
+  top: 18px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 16px;
+  border-radius: 999px;
+  background: rgba(10, 13, 18, .55);
+  backdrop-filter: blur(6px);
+  border: 1px solid rgba(148, 190, 255, .18);
+}
+
+.tracker-label {
+  font-size: 11px;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+#pips { display: flex; gap: 7px; }
+
+#pips i {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  border: 1px solid rgba(134, 197, 255, .5);
+  background: transparent;
+  transition: background .25s ease, box-shadow .25s ease, transform .25s ease;
+}
+
+#pips i.struck {
+  background: #86c5ff;
+  box-shadow: 0 0 12px rgba(134, 197, 255, .9);
+  transform: scale(1.15);
+}
+
+/* Game over --------------------------------------------------------------- */
+
+#gameover {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: rgba(6, 8, 12, .72);
+  backdrop-filter: blur(3px);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity .8s ease;
+  z-index: 20;
+}
+#gameover.show { opacity: 1; pointer-events: auto; }
+
+#gameover .card { text-align: center; padding: 0 24px; }
+
+#gameover h2 {
+  margin: 0 0 10px;
+  font-size: 26px;
+  font-weight: 600;
+  letter-spacing: .01em;
+}
+
+#gameover p { margin: 0 0 26px; color: var(--muted); }
+
+#gameover button {
+  font: inherit;
+  color: var(--bg);
+  background: #86c5ff;
+  border: 0;
+  border-radius: 999px;
+  padding: 10px 26px;
+  cursor: pointer;
+  transition: transform .15s ease, background .15s ease;
+}
+#gameover button:hover { background: #a6d5ff; transform: translateY(-1px); }

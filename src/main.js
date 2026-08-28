@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 import { buildManor, resolveCollisions, isBlocked } from './manor.js';
-import { spawnGhost } from './ghost.js';
+import { spawnGhost, HITS_TO_BANISH } from './ghost.js';
 
 const ASSET_DIR = '/assets/characters/main-character';
 
@@ -46,6 +46,31 @@ const GRAVITY = 12;
 // How far the camera keeps off walls and furniture, so the near plane never
 // pokes through a surface.
 const CAMERA_MARGIN = 0.35;
+
+// The camera sits behind the character and drifts back into place on its own.
+// Soft, not rigid: a proportional pull with a ceiling on how fast it can swing,
+// so it trails the turn instead of snapping to it.
+const FOLLOW_GAIN = 2.4;
+const FOLLOW_MAX_RATE = 2.2; // rad/s
+const FOLLOW_DEADZONE = 0.04; // rad; stops micro-jitter when nearly aligned
+const FOLLOW_DELAY = 0.7; // s of no dragging before the camera takes over again
+// Input within this cone of camera-forward counts as "running forwards".
+const FOLLOW_CONE = Math.PI / 4;
+
+// Standing still, the character turns to match the camera instead: whichever
+// one the player is actively steering leads, and the other follows.
+const TURN_TO_CAMERA = 4.5; // rad/s
+
+// Combat. The strike lands partway through the punch clip rather than on the
+// keypress, so the hit connects when the arm is actually out.
+const PUNCH_STRIKE_TIME = 0.32; // s into the clip
+const PUNCH_REACH = 1.6; // m, measured centre to centre
+const PUNCH_ARC = Math.PI / 2.2; // the ghost must be in front, not behind
+// The combo clips run 3.9-5.0 s. Waiting one out between punches makes the
+// fight unplayable, so a punch only owns the body briefly and can be thrown
+// again well before its clip ends.
+const PUNCH_HOLD = 1.0; // s the punch animation stays in control
+const PUNCH_COOLDOWN = 0.5; // s before another punch can be thrown
 
 /* ------------------------------------------------------------------ renderer */
 
@@ -104,7 +129,11 @@ const state = {
   grounded: true,
   facing: 0,
   radius: 0.4,
-  punching: false,
+  punchTimer: 0, // how long the punch still owns the animation
+  cooldown: 0, // time until another punch may be thrown
+  strikeAt: 0, // countdown to the moment this punch connects
+  hits: 0,
+  over: false,
 };
 
 let mixer = null;
@@ -129,19 +158,22 @@ addEventListener('keyup', (e) => keys.delete(e.code));
 // Punch is a one-shot rather than a held state, so it fires on the keypress
 // instead of being polled in the loop.
 addEventListener('keydown', (e) => {
-  if (e.code !== 'KeyF' || e.repeat || state.punching) return;
+  if (e.code !== 'KeyF' || e.repeat || state.cooldown > 0 || state.over) return;
   const clip = state.grounded ? (Math.random() < 0.5 ? 'punch' : 'punchAlt') : 'jumpPunch';
   if (!actions[clip]) return;
-  state.punching = true;
+  state.punchTimer = PUNCH_HOLD;
+  state.cooldown = PUNCH_COOLDOWN;
+  state.strikeAt = PUNCH_STRIKE_TIME;
   play(clip, 0.1, true);
 });
 addEventListener('blur', () => keys.clear());
 
 // Orbit camera: yaw/pitch around the character, mouse or touch drag.
-const orbit = { yaw: Math.PI * 0.15, pitch: 0.28, distance: 4.2, dragging: false, lastX: 0, lastY: 0 };
+const orbit = { yaw: Math.PI * 0.15, pitch: 0.28, distance: 4.2, dragging: false, lastX: 0, lastY: 0, sinceDrag: FOLLOW_DELAY };
 
 canvas.addEventListener('pointerdown', (e) => {
   orbit.dragging = true;
+  orbit.sinceDrag = 0;
   orbit.lastX = e.clientX;
   orbit.lastY = e.clientY;
   canvas.setPointerCapture(e.pointerId);
@@ -152,9 +184,11 @@ canvas.addEventListener('pointermove', (e) => {
   orbit.pitch = clamp(orbit.pitch + (e.clientY - orbit.lastY) * 0.005, -0.2, 1.2);
   orbit.lastX = e.clientX;
   orbit.lastY = e.clientY;
+  orbit.sinceDrag = 0;
 });
 const endDrag = (e) => {
   orbit.dragging = false;
+  orbit.sinceDrag = 0;
   if (e.pointerId !== undefined && canvas.hasPointerCapture?.(e.pointerId)) {
     canvas.releasePointerCapture(e.pointerId);
   }
@@ -172,6 +206,9 @@ const loaderEl = document.getElementById('loader');
 const barFill = document.getElementById('bar-fill');
 const statusEl = document.getElementById('loader-status');
 const hud = document.getElementById('hud');
+const pipsEl = document.getElementById('pips');
+const overlayEl = document.getElementById('gameover');
+document.getElementById('again')?.addEventListener('click', () => location.reload());
 
 const gltfLoader = new GLTFLoader();
 const load = (url, onProgress) => new Promise((res, rej) => gltfLoader.load(url, res, onProgress, rej));
@@ -214,6 +251,7 @@ const load = (url, onProgress) => new Promise((res, rej) => gltfLoader.load(url,
     loaderEl.classList.add('done');
     setTimeout(() => loaderEl.remove(), 700);
     hud.hidden = false;
+    document.getElementById('tracker').hidden = false;
 
     // Remaining clips load in the background; each is pulled out of its file
     // and its skinned mesh discarded.
@@ -272,12 +310,13 @@ function play(name, fade = 0.18, restart = false) {
   current = next;
 }
 
-// One-shots hand control back to locomotion when they finish. `current` is left
-// alone: clampWhenFinished holds the last frame, and re-nulling it here would
-// make the state machine retrigger the same clip on the very next frame.
+// Punches now hand control back on a timer (see PUNCH_HOLD) rather than when
+// the clip ends, so this only needs to release a punch that finishes early.
+// `current` is left alone: clampWhenFinished holds the last frame, and
+// re-nulling it here would retrigger the same clip on the very next frame.
 function onceFinished(e) {
   if (e.action === actions.punch || e.action === actions.punchAlt || e.action === actions.jumpPunch) {
-    state.punching = false;
+    state.punchTimer = 0;
   }
 }
 
@@ -403,12 +442,19 @@ function tick(dtOverride) {
       Math.atan2(desired.x, desired.z),
       TURN_SPEED * dt
     );
+  } else {
+    // Idle: come around to wherever the camera is looking.
+    state.facing = angleTowards(state.facing, orbit.yaw, TURN_TO_CAMERA * dt);
   }
   character.rotation.y = state.facing;
 
   const planarSpeed = Math.hypot(state.velocity.x, state.velocity.z);
   updateAnimation(planarSpeed, dt);
+  updateCameraFollow(dt, moving, desired);
 
+  state.punchTimer = Math.max(0, state.punchTimer - dt);
+  state.cooldown = Math.max(0, state.cooldown - dt);
+  updateCombat(dt);
   ghost?.update(dt);
 
   updateCamera(dt);
@@ -419,8 +465,8 @@ function updateAnimation(speed, dt) {
   if (!mixer) return;
 
   if (!state.grounded) {
-    play(state.punching ? 'jumpPunch' : 'jump');
-  } else if (state.punching) {
+    play(state.punchTimer > 0 ? 'jumpPunch' : 'jump');
+  } else if (state.punchTimer > 0) {
     // Held by the one-shot until its 'finished' event clears the flag.
   } else if (speed < 0.1) {
     play('idle', 0.25);
@@ -441,6 +487,75 @@ function setRate(name, speed) {
   const action = actions[name];
   if (!action) return;
   action.setEffectiveTimeScale(clamp(speed / CLIP_SPEED[name], 0.6, 1.8));
+}
+
+// Resolves a punch once it reaches its strike frame: the ghost has to be within
+// reach and in front of the character, not merely nearby.
+function updateCombat(dt) {
+  if (state.strikeAt <= 0) return;
+
+  state.strikeAt -= dt;
+  if (state.strikeAt > 0) return;
+  state.strikeAt = 0;
+
+  if (!ghost?.alive) return;
+
+  const dx = ghost.position.x - character.position.x;
+  const dz = ghost.position.z - character.position.z;
+  if (Math.hypot(dx, dz) > PUNCH_REACH) return;
+  if (Math.abs(angleDelta(Math.atan2(dx, dz), state.facing)) > PUNCH_ARC) return;
+
+  const hits = ghost.hit(character.position);
+  if (hits === null) return;
+
+  state.hits = hits;
+  updateHitPips();
+  if (hits >= HITS_TO_BANISH) endGame();
+}
+
+function updateHitPips() {
+  if (!pipsEl) return;
+  for (const [i, pip] of [...pipsEl.children].entries()) {
+    pip.classList.toggle('struck', i < state.hits);
+  }
+}
+
+function endGame() {
+  if (state.over) return;
+  state.over = true;
+  // Let the death animation play before the card lands.
+  setTimeout(() => overlayEl?.classList.add('show'), 1400);
+}
+
+// Eases the camera back behind the character while she is running forwards.
+//
+// Deliberately skipped while strafing: movement input is camera-relative, so if
+// the camera chased a sideways facing it would rotate the input frame, which
+// rotates the facing again -- the character would curve away on a held strafe
+// key. Recentering only when idle or running forwards keeps that loop open, and
+// the camera still swings in behind the moment the strafe key is released.
+function updateCameraFollow(dt, moving, dir) {
+  if (orbit.dragging) {
+    orbit.sinceDrag = 0;
+    return;
+  }
+  orbit.sinceDrag += dt;
+  if (orbit.sinceDrag < FOLLOW_DELAY) return;
+
+  // Standing still, the character turns to the camera instead -- if both moved
+  // at once they would meet in the middle and neither would end up where the
+  // player pointed.
+  if (!moving) return;
+
+  const inputAngle = Math.atan2(dir.x, dir.z);
+  if (Math.abs(angleDelta(inputAngle, orbit.yaw)) > FOLLOW_CONE) return;
+
+  const diff = angleDelta(state.facing, orbit.yaw);
+  if (Math.abs(diff) < FOLLOW_DEADZONE) return;
+
+  const step = diff * FOLLOW_GAIN * dt;
+  const cap = FOLLOW_MAX_RATE * dt;
+  orbit.yaw += clamp(step, -cap, cap);
 }
 
 function updateCamera(dt) {
@@ -486,6 +601,11 @@ function approach(current, goal, maxDelta) {
   const diff = goal - current;
   if (Math.abs(diff) <= maxDelta) return goal;
   return current + Math.sign(diff) * maxDelta;
+}
+
+// Signed shortest angle from b to a, in (-pi, pi].
+function angleDelta(a, b) {
+  return ((a - b + Math.PI) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2) - Math.PI;
 }
 
 // Shortest-path angular step, so turning past ±π doesn't spin the long way.

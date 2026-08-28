@@ -16,7 +16,19 @@ const BASE_URL = `${DIR}/ghost-biped-Animation-Walking-withSkin.glb`;
 const CLIP_FILES = {
   run: 'ghost-biped-Animation-Running-withSkin.glb',
   strut: 'ghost-biped-Animation-Flirty-Strut-withSkin.glb',
+  hit: 'ghost-biped-Animation-Hit-Reaction-withSkin.glb',
+  dead: 'ghost-biped-Animation-Dead-withSkin.glb',
 };
+
+// Every reaction clip travels: the stagger covers 1.13 m, the death 0.70 m.
+// Their horizontal motion is stripped and re-applied in code, so a hit can
+// never shove the ghost through a wall.
+const ONE_SHOTS = new Set(['hit', 'dead']);
+
+export const HITS_TO_BANISH = 3;
+const STUN_TIME = 1.15;
+const KNOCKBACK = 0.75;
+const FADE_TIME = 2.2;
 
 const HEIGHT = 1.75;
 const NAV_CELL = 0.5; // navigation grid resolution, metres
@@ -75,8 +87,13 @@ export async function spawnGhost({ scene, level }) {
   const actions = {};
   const addClip = (name, clip) => {
     if (!clip) return;
-    if (name === 'strut') stripHorizontalRootMotion(clip);
-    actions[name] = mixer.clipAction(clip);
+    stripHorizontalRootMotion(clip);
+    const action = mixer.clipAction(clip);
+    if (ONE_SHOTS.has(name)) {
+      action.setLoop(THREE.LoopOnce, 1);
+      action.clampWhenFinished = true;
+    }
+    actions[name] = action;
   };
   addClip('walk', base.animations[0]);
 
@@ -163,6 +180,12 @@ export async function spawnGhost({ scene, level }) {
   let running = false;
   let current = null;
   let bob = 0;
+  let stun = 0;
+  let hits = 0;
+  let dead = false;
+  let fade = 0;
+  const materials = [];
+  model.traverse((o) => { if (o.isMesh) materials.push(o.material); });
 
   // The remaining clips stream in after the ghost is already walking.
   Promise.all(
@@ -200,8 +223,62 @@ export async function spawnGhost({ scene, level }) {
     path = null;
   }
 
+  /**
+   * Registers a hit from `source`. Returns the running hit count, or null if
+   * the ghost is already gone (so a flurry of punches can't overkill it).
+   */
+  function hit(source) {
+    if (dead) return null;
+
+    hits++;
+    stun = STUN_TIME;
+    path = null;
+
+    // Knock it back, but only into space it is allowed to occupy.
+    const dx = group.position.x - source.x;
+    const dz = group.position.z - source.z;
+    const len = Math.hypot(dx, dz) || 1;
+    const nx = group.position.x + (dx / len) * KNOCKBACK;
+    const nz = group.position.z + (dz / len) * KNOCKBACK;
+    if (!isBlocked(nx, nz, level.colliders, RADIUS)) {
+      group.position.x = nx;
+      group.position.z = nz;
+    }
+
+    // Face its attacker as it reels.
+    facing = Math.atan2(-dx, -dz);
+    group.rotation.y = facing;
+
+    if (hits >= HITS_TO_BANISH) {
+      dead = true;
+      play('dead', 0.12);
+    } else {
+      play('hit', 0.08);
+    }
+    return hits;
+  }
+
   function update(dt) {
     mixer.update(dt);
+
+    if (dead) {
+      // Settle onto the floor -- the death clip drops the body, and the idle
+      // hover would otherwise leave it lying in mid-air.
+      group.position.y = Math.max(0, group.position.y - dt * 0.4);
+      // Sink and dissolve once the death clip has played out.
+      fade = Math.min(fade + dt, FADE_TIME + 1);
+      const t = Math.max(0, (fade - 1) / FADE_TIME);
+      for (const m of materials) m.opacity = 0.42 * (1 - t);
+      glow.intensity = 5 * (1 - t);
+      group.visible = t < 1;
+      return;
+    }
+
+    if (stun > 0) {
+      stun -= dt;
+      if (stun <= 0) retarget();
+      return;
+    }
 
     // Drift: a ghost should never look quite planted on the floor.
     bob += dt;
@@ -243,7 +320,15 @@ export async function spawnGhost({ scene, level }) {
     actions[clip]?.setEffectiveTimeScale(speed / CLIP_SPEED[clip]);
   }
 
-  return { group, update, get target() { return path?.[path.length - 1] ?? null; } };
+  return {
+    group,
+    update,
+    hit,
+    get position() { return group.position; },
+    get alive() { return !dead; },
+    get hits() { return hits; },
+    get target() { return path?.[path.length - 1] ?? null; },
+  };
 }
 
 function stripHorizontalRootMotion(clip) {
