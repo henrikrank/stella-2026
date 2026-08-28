@@ -51,10 +51,20 @@ const GRAVITY = 12;
 // pokes through a surface.
 const CAMERA_MARGIN = 0.35;
 
-// The camera is the one steering: the character turns to match it, softly, so
-// the view is always over her shoulder. A/D and drag rotate the pair together.
+// While playing, the camera steers: the character turns to match it, so the
+// view stays over her shoulder. A/D swing the pair around together.
 const TURN_TO_CAMERA = 7.0; // rad/s
 const TURN_RATE = 2.4; // rad/s, how fast A/D swing the view around
+
+// Dragging the mouse breaks that link and frees the camera, so you can orbit
+// right around and look at her. She holds her ground while you do -- if she
+// kept following the camera you could never get in front of her. Touch a
+// movement key, or leave the mouse alone for a moment, and it settles back.
+const FREE_LOOK_HOLD = 1.4; // s of no mouse before the camera returns
+const RETURN_GAIN = 2.2; // proportional pull back to behind her
+const RETURN_MAX_RATE = 2.6; // rad/s ceiling, so it glides rather than snaps
+const RETURN_SETTLED = 0.025; // rad; close enough to hand control back
+const DEFAULT_PITCH = 0.28; // the resting over-the-shoulder height
 
 // Combat. The strike lands partway through the punch clip rather than on the
 // keypress, so the hit connects when the arm is actually out.
@@ -168,10 +178,21 @@ addEventListener('keydown', (e) => {
 addEventListener('blur', () => keys.clear());
 
 // Orbit camera: yaw/pitch around the character, mouse or touch drag.
-const orbit = { yaw: Math.PI * 0.15, pitch: 0.28, distance: 4.2, dragging: false, lastX: 0, lastY: 0, };
+const orbit = {
+  yaw: Math.PI * 0.15,
+  pitch: DEFAULT_PITCH,
+  distance: 4.2,
+  dragging: false,
+  lastX: 0,
+  lastY: 0,
+  free: false, // true while the camera is off the leash
+  sinceMouse: 0, // seconds since the last drag
+};
 
 canvas.addEventListener('pointerdown', (e) => {
   orbit.dragging = true;
+  orbit.free = true;
+  orbit.sinceMouse = 0;
   orbit.lastX = e.clientX;
   orbit.lastY = e.clientY;
   canvas.setPointerCapture(e.pointerId);
@@ -182,9 +203,11 @@ canvas.addEventListener('pointermove', (e) => {
   orbit.pitch = clamp(orbit.pitch + (e.clientY - orbit.lastY) * 0.005, -0.2, 1.2);
   orbit.lastX = e.clientX;
   orbit.lastY = e.clientY;
+  orbit.sinceMouse = 0;
 });
 const endDrag = (e) => {
   orbit.dragging = false;
+  orbit.sinceMouse = 0;
   if (e.pointerId !== undefined && canvas.hasPointerCapture?.(e.pointerId)) {
     canvas.releasePointerCapture(e.pointerId);
   }
@@ -456,11 +479,14 @@ function tick(dtOverride) {
   // Turn to face the input direction rather than the velocity — velocity gets
   // zeroed against the walls, which would make the facing wobble when pushing
   // into one.
-  // The camera owns the facing outright, so her back is always to it. Movement
-  // stays camera-relative, which means A/D/S now strafe and back up without
-  // turning her -- the trade for never seeing her front.
-  state.facing = angleTowards(state.facing, orbit.yaw, TURN_TO_CAMERA * dt);
+  // Locked play: the camera owns the facing, so her back is always to it.
+  // During free look she holds still and the camera moves around her instead.
+  if (!orbit.free) {
+    state.facing = angleTowards(state.facing, orbit.yaw, TURN_TO_CAMERA * dt);
+  }
   character.rotation.y = state.facing;
+
+  updateFreeLook(dt, moving || turn !== 0);
 
   const planarSpeed = Math.hypot(state.velocity.x, state.velocity.z);
   updateAnimation(planarSpeed, dt);
@@ -508,6 +534,37 @@ function setRate(name, speed, backwards = false) {
   // Reversing the clip when backing up beats moonwalking, and costs nothing.
   const rate = clamp(speed / CLIP_SPEED[name], 0.6, 1.8);
   action.setEffectiveTimeScale(backwards ? -rate : rate);
+}
+
+// Hands the camera back to the character after a spell of free looking: either
+// the player started moving again, or the mouse has been still long enough.
+function updateFreeLook(dt, playerIsDriving) {
+  if (!orbit.free) return;
+
+  // Reaching for the controls always wins -- no waiting out the timer.
+  if (playerIsDriving) {
+    orbit.free = false;
+    return;
+  }
+
+  if (orbit.dragging) {
+    orbit.sinceMouse = 0;
+    return;
+  }
+
+  orbit.sinceMouse += dt;
+  if (orbit.sinceMouse < FREE_LOOK_HOLD) return;
+
+  // Glide back behind her, levelling the pitch on the way.
+  const diff = angleDelta(state.facing, orbit.yaw);
+  const cap = RETURN_MAX_RATE * dt;
+  orbit.yaw += clamp(diff * RETURN_GAIN * dt, -cap, cap);
+  orbit.pitch += (DEFAULT_PITCH - orbit.pitch) * Math.min(1, RETURN_GAIN * dt);
+
+  if (Math.abs(angleDelta(state.facing, orbit.yaw)) < RETURN_SETTLED) {
+    orbit.yaw = state.facing;
+    orbit.free = false;
+  }
 }
 
 // Hovers the axe until the character walks into it, then puts it in her hand.
