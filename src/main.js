@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 import { buildManor, resolveCollisions, isBlocked } from './manor.js';
+import { spawnGhost } from './ghost.js';
 
 const ASSET_DIR = '/assets/characters/main-character';
 
@@ -30,6 +31,7 @@ const IDLE_FRAME_TIME = 0.0;
 
 // Filled in once the manor is built; the level's walls are the bounds now.
 let level = null;
+let ghost = null;
 const CHARACTER_HEIGHT = 1.8;
 
 // Tuned against the walk cycle: at 1.8 the clip plays near 1.2x, which keeps
@@ -215,6 +217,10 @@ const load = (url, onProgress) => new Promise((res, rej) => gltfLoader.load(url,
 
     // Remaining clips load in the background; each is pulled out of its file
     // and its skinned mesh discarded.
+    spawnGhost({ scene, level })
+      .then((g) => { ghost = g; })
+      .catch((err) => console.error('ghost failed to spawn', err));
+
     const entries = Object.entries(CLIP_FILES);
     const loaded = await Promise.all(
       entries.map(([, file]) => load(`${ASSET_DIR}/${file}`).then((g) => g.animations[0]))
@@ -403,6 +409,8 @@ function tick(dtOverride) {
   const planarSpeed = Math.hypot(state.velocity.x, state.velocity.z);
   updateAnimation(planarSpeed, dt);
 
+  ghost?.update(dt);
+
   updateCamera(dt);
   renderer.render(scene, camera);
 }
@@ -501,6 +509,7 @@ resize();
 window.stella = {
   THREE, scene, camera, renderer, character, state, orbit,
   get level() { return level; },
+  get ghost() { return ghost; },
   step: tick,
   get actions() { return actions; },
   get current() { return current?._clip?.name ?? null; },
